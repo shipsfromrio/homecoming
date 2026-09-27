@@ -1,0 +1,768 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { fosterSessions, returnFosterings, summariseOutcomes } from '../src/engine/executor.js';
+import { removeSafely } from '../src/util/fsatomic.js';
+import { Ledger } from '../src/ledger/log.js';
+import { listActive, project } from '../src/ledger/project.js';
+import { scanAccount } from '../src/store/scanner.js';
+import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
+
+let store: StoreLayout;
+let ledger: Ledger;
+
+beforeEach(() => {
+  store = makeStore();
+  ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-led-')), 'ledger.jsonl'));
+});
+
+function seed(overrides: Partial<CodeSessionData> = {}) {
+  writeSession(store, OLD_ACCOUNT, session(overrides));
+  return scanAccount(store, OLD_ACCOUNT);
+}
+
+/** Tests drive a synthetic store, so the real removal gate is not the thing under test. */
+const noGuard = () => {};
+const opts = () => ({ store, ledger, target: NEW_ACCOUNT });
+
+describe('fosterSessions', () => {
+  it('writes a copy into the target account and leaves the original untouched', () => {
+    const sessions = seed({ title: 'Refactor parser' });
+    const originalBytes = readFileSync(sessions[0]!.path);
+
+    const [outcome] = fosterSessions(sessions, opts());
+
+    expect(outcome!.status).toBe('fostered');
+    expect(existsSync(outcome!.copyPath!)).toBe(true);
+    expect(readFileSync(sessions[0]!.path)).toEqual(originalBytes);
+  });
+
+  it('gives the copy a fresh id while keeping the transcript pointer', () => {
+    const sessions = seed();
+    const [outcome] = fosterSessions(sessions, opts());
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+
+    expect(copy.sessionId).not.toBe(sessions[0]!.data.sessionId);
+    expect(copy.cliSessionId).toBe(sessions[0]!.data.cliSessionId);
+  });
+
+  it('strips an inherited error so the session does not show a stale warning', () => {
+    const sessions = seed({ error: 'weekly limit reached', errorAt: 1_700_000_400_000 });
+    const [outcome] = fosterSessions(sessions, opts());
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+
+    expect(copy.error).toBeUndefined();
+    expect(copy.errorAt).toBeUndefined();
+  });
+
+  it('is idempotent — re-running does not mint a second copy', () => {
+    const sessions = seed();
+    fosterSessions(sessions, opts());
+    const second = fosterSessions(sessions, opts());
+
+    expect(second[0]!.status).toBe('skipped');
+    expect(second[0]!.detail).toBe('already in this account');
+    expect(listActive(project(ledger.read()))).toHaveLength(1);
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
+  });
+
+  it('skips sessions that would never appear in the sidebar', () => {
+    const scheduled = session({
+      sessionId: '00000000-0000-4000-8000-00000000005a',
+      scheduledTaskId: 'nightly',
+    });
+    writeSession(store, OLD_ACCOUNT, scheduled);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), opts());
+    const skipped = outcomes.find((o) => o.originSessionId === scheduled.sessionId);
+
+    expect(skipped!.status).toBe('skipped');
+    expect(skipped!.detail).toContain('scheduled-task');
+  });
+
+  it('brings a scheduled task across when asked, as an ordinary conversation', () => {
+    const scheduled = session({
+      sessionId: '00000000-0000-4000-8000-00000000005b',
+      scheduledTaskId: 'nightly',
+      // The ordinary case: a task that runs unattended was never opened, and that
+      // is the other reason the app would refuse to list it.
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, scheduled);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      includeScheduled: true,
+    });
+    const outcome = outcomes.find((o) => o.originSessionId === scheduled.sessionId);
+    expect(outcome!.status).toBe('fostered');
+
+    // The point of the flag: a copy that kept either mark would be written and
+    // then silently never listed.
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as Record<string, unknown>;
+    expect(copy.scheduledTaskId).toBeUndefined();
+    expect(copy.lastFocusedAt).toEqual(expect.any(Number));
+    expect(copy.cliSessionId).toBe(scheduled.cliSessionId);
+  });
+
+  it('refuses a spawned session by default, saying which reason held it', () => {
+    const spawned = session({
+      sessionId: '00000000-0000-4000-8000-00000000005d',
+      spawnedFrom: { sessionId: 'local_parent', taskId: 'task_1' },
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, spawned);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), opts());
+    const skipped = outcomes.find((o) => o.originSessionId === spawned.sessionId);
+
+    expect(skipped!.status).toBe('skipped');
+    expect(skipped!.detail).toContain('spawned-task');
+  });
+
+  it('brings a spawned session across when asked, as an ordinary conversation', () => {
+    const spawned = session({
+      sessionId: '00000000-0000-4000-8000-00000000005e',
+      spawnedFrom: { sessionId: 'local_parent', taskId: 'task_1' },
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, spawned);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      includeSpawned: true,
+    });
+    const outcome = outcomes.find((o) => o.originSessionId === spawned.sessionId);
+    expect(outcome!.status).toBe('fostered');
+
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as Record<string, unknown>;
+    expect(copy.spawnedFrom).toBeUndefined();
+    expect(copy.lastFocusedAt).toEqual(expect.any(Number));
+    // The conversation is the part worth having, and it is shared, not copied.
+    expect(copy.cliSessionId).toBe(spawned.cliSessionId);
+  });
+
+  /**
+   * The two flags are separate questions. Asking for schedules and getting
+   * background work as well would be the kind of quiet over-reach that makes a
+   * sweep untrustworthy.
+   */
+  it('--include-scheduled does not smuggle spawned sessions in with it', () => {
+    const spawned = session({
+      sessionId: '00000000-0000-4000-8000-00000000005f',
+      spawnedFrom: { taskId: 'task_1' },
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, spawned);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      includeScheduled: true,
+    });
+    expect(outcomes.find((o) => o.originSessionId === spawned.sessionId)!.status).toBe('skipped');
+  });
+
+  it('leaves the scheduled task itself alone in the account that owns it', () => {
+    const scheduled = session({
+      sessionId: '00000000-0000-4000-8000-00000000005c',
+      scheduledTaskId: 'nightly',
+    });
+    const originPath = writeSession(store, OLD_ACCOUNT, scheduled);
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), includeScheduled: true });
+
+    const origin = JSON.parse(readFileSync(originPath, 'utf8')) as Record<string, unknown>;
+    expect(origin.scheduledTaskId).toBe('nightly');
+  });
+
+  it('writes nothing on a dry run', () => {
+    const sessions = seed();
+    const [outcome] = fosterSessions(sessions, { ...opts(), dryRun: true });
+
+    expect(outcome!.status).toBe('fostered');
+    expect(existsSync(outcome!.copyPath!)).toBe(false);
+    expect(ledger.read()).toHaveLength(0);
+  });
+
+  it('reports per session, so one failure does not abort the batch', () => {
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-00000000006a' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-00000000006b', scheduledTaskId: 'nightly' }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), opts());
+
+    expect(summariseOutcomes(outcomes)).toMatchObject({ fostered: 1, skipped: 1, failed: 0 });
+  });
+});
+
+describe('returnFosterings', () => {
+  it('removes the copy and clears it from active state', () => {
+    const sessions = seed();
+    const [fosterOutcome] = fosterSessions(sessions, opts());
+    const active = listActive(project(ledger.read()));
+
+    const [returned] = returnFosterings(active, { store, ledger, guard: noGuard });
+
+    expect(returned!.status).toBe('returned');
+    expect(existsSync(fosterOutcome!.copyPath!)).toBe(false);
+    expect(listActive(project(ledger.read()))).toHaveLength(0);
+  });
+
+  it('leaves the origin account exactly as it was', () => {
+    const sessions = seed();
+    const originalBytes = readFileSync(sessions[0]!.path);
+    fosterSessions(sessions, opts());
+    returnFosterings(listActive(project(ledger.read())), { store, ledger, guard: noGuard });
+
+    expect(readFileSync(sessions[0]!.path)).toEqual(originalBytes);
+    expect(scanAccount(store, OLD_ACCOUNT)).toHaveLength(1);
+  });
+
+  it('treats an already-deleted copy as success', () => {
+    const sessions = seed();
+    fosterSessions(sessions, opts());
+    const active = listActive(project(ledger.read()));
+    // Simulate the user deleting it in the app instead.
+    removeSafely(active[0]!.copyPath);
+
+    const [returned] = returnFosterings(active, { store, ledger, guard: noGuard });
+
+    expect(returned!.status).toBe('returned');
+  });
+
+  it('can re-foster after a return', () => {
+    const sessions = seed();
+    fosterSessions(sessions, opts());
+    returnFosterings(listActive(project(ledger.read())), { store, ledger, guard: noGuard });
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), opts());
+
+    expect(again[0]!.status).toBe('fostered');
+  });
+
+  it('refuses when the gate objects, and removes nothing', () => {
+    const sessions = seed();
+    const [fostered] = fosterSessions(sessions, opts());
+    const active = listActive(project(ledger.read()));
+    const refuse = () => {
+      throw new Error('Claude Desktop is running');
+    };
+
+    expect(() => returnFosterings(active, { store, ledger, guard: refuse })).toThrow(/running/);
+    expect(existsSync(fostered!.copyPath!)).toBe(true);
+  });
+
+  it('does not consult the gate for a dry run', () => {
+    const sessions = seed();
+    fosterSessions(sessions, opts());
+    const refuse = () => {
+      throw new Error('should not be called');
+    };
+
+    expect(() =>
+      returnFosterings(listActive(project(ledger.read())), {
+        store,
+        ledger,
+        guard: refuse,
+        dryRun: true,
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('a dry run and the write it previews', () => {
+  const CONVERSATION = '00000000-0000-4000-8000-0000000000f1';
+
+  /** Two cards, in two source accounts, holding one conversation. */
+  function twoCardsForOneConversation() {
+    const a = session({ sessionId: '00000000-0000-4000-8000-0000000000f2' });
+    const b = session({ sessionId: '00000000-0000-4000-8000-0000000000f3' });
+    a.cliSessionId = CONVERSATION;
+    b.cliSessionId = CONVERSATION;
+    writeSession(store, OLD_ACCOUNT, a);
+    writeSession(store, OLD_ACCOUNT, b);
+    return scanAccount(store, OLD_ACCOUNT);
+  }
+
+  it('agree on the count', () => {
+    // The preview used to record nothing, so it counted one row per source card
+    // while the write produces one row per conversation: "2 would be fostered"
+    // followed by "1 fostered".
+    const sessions = twoCardsForOneConversation();
+    const previewed = summariseOutcomes(
+      fosterSessions(sessions, { store, ledger, target: NEW_ACCOUNT, dryRun: true }),
+    );
+    const written = summariseOutcomes(
+      fosterSessions(sessions, { store, ledger, target: NEW_ACCOUNT }),
+    );
+
+    expect(previewed.fostered).toBe(1);
+    expect(written.fostered).toBe(1);
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
+  });
+
+  it('leaves the ledger untouched while previewing', () => {
+    fosterSessions(twoCardsForOneConversation(), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      dryRun: true,
+    });
+
+    expect(ledger.read()).toEqual([]);
+  });
+});
+
+describe('archived sessions', () => {
+  function archived() {
+    const data = session({ sessionId: '00000000-0000-4000-8000-0000000000f4', isArchived: true });
+    writeSession(store, OLD_ACCOUNT, data);
+    return scanAccount(store, OLD_ACCOUNT);
+  }
+
+  it('are left alone by default', () => {
+    const [outcome] = fosterSessions(archived(), { store, ledger, target: NEW_ACCOUNT });
+
+    expect(outcome!.status).toBe('skipped');
+    expect(outcome!.detail).toContain('archived');
+  });
+
+  it('come across when asked for, still archived', () => {
+    // The point is reaching the conversation from the other account, not undoing
+    // the decision to tuck it away: it lands in the destination's archived view.
+    fosterSessions(archived(), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      includeArchived: true,
+    });
+
+    const [copy] = scanAccount(store, NEW_ACCOUNT);
+    expect(copy!.data.isArchived).toBe(true);
+    expect(copy!.data.cliSessionId).toBe('00000000-0000-4000-8000-0000000000f4');
+  });
+
+  it('still refuse for any other reason', () => {
+    const data = session({
+      sessionId: '00000000-0000-4000-8000-0000000000f5',
+      isArchived: true,
+      scheduledTaskId: 'task-1',
+    });
+    writeSession(store, OLD_ACCOUNT, data);
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      includeArchived: true,
+    });
+
+    expect(outcome!.status).toBe('skipped');
+    expect(outcome!.detail).toBe('scheduled-task');
+  });
+});
+
+/**
+ * `resolveExisting` used to vouch for a copy the ledger called `present`
+ * without asking whether that copy could actually open the work — the question
+ * `unreached` exists to answer a few lines below the call site. A copy made
+ * while the origin card sat in a worktree, then left behind when the card was
+ * repointed at the repository (one `cliSessionId` can occupy more than one
+ * file), was refused on identity alone even though the repository's file holds
+ * a record the worktree's copy cannot reach.
+ */
+describe('identity does not outrank reach', () => {
+  const CLI_ID = '00000000-0000-4000-8000-0000000000e1';
+  const SHARED_A = '00000000-0000-4000-8000-0000000000e2';
+  const SHARED_B = '00000000-0000-4000-8000-0000000000e3';
+  const TREE_ONLY = '00000000-0000-4000-8000-0000000000e4';
+  const REPO_ONLY = '00000000-0000-4000-8000-0000000000e5';
+  const ORIGIN_ID = '00000000-0000-4000-8000-0000000000e6';
+  const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
+  const REPO = 'C:\\work\\project';
+
+  function rec(uuid: string) {
+    return { uuid, type: 'assistant' };
+  }
+
+  /** Writes one of the conversation's two files, named the way the app names them. */
+  function transcript(configDir: string, project: string, uuids: string[]): void {
+    const dir = path.join(configDir, 'projects', project);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `${CLI_ID}.jsonl`),
+      uuids.map((uuid) => JSON.stringify(rec(uuid))).join('\n'),
+      'utf8',
+    );
+  }
+
+  it('re-fosters when the ledger already calls it present but the offered card reaches more', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-reach-'));
+    // The worktree's file holds the shared history plus one record of its own;
+    // the repository's holds the same shared history plus a different one —
+    // the two-file split, one `cliSessionId` naming two files.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED_A, SHARED_B, TREE_ONLY]);
+    transcript(configDir, 'C--work-project', [SHARED_A, SHARED_B, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    // The origin starts in the worktree, so the only copy fostering can make is
+    // one that opens the worktree's file — the shorter of the two.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: TREE, originCwd: TREE }),
+    );
+    const first = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(first[0]!.status).toBe('fostered');
+
+    // The card is repointed at the repository — by hand, by `foster point`, or
+    // by the app itself — so it now names the fuller file. Nothing told the
+    // existing copy, which still sits in the worktree.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: REPO, originCwd: REPO }),
+    );
+
+    const second = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+
+    expect(second[0]!.status).toBe('fostered');
+    expect(second[0]!.beyond).toBe(1);
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(2);
+  });
+
+  it('still skips when the existing copy already reaches everything the offered card would', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-reach-same-'));
+    transcript(configDir, 'C--work-project', [SHARED_A, SHARED_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: REPO, originCwd: REPO }),
+    );
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+
+    const second = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+
+    expect(second[0]!.status).toBe('skipped');
+    expect(second[0]!.detail).toBe('already in this account');
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
+  });
+});
+
+/**
+ * `buildFosterCopy` used to send every worktree card's copy to `originCwd`
+ * without looking at what was there. Measured on a real store: of 93 cards
+ * sitting in a worktree whose conversation is held in more than one file, 32
+ * copies would open fewer records than the source and 13 would open none at
+ * all — the worktree's own file was the fuller one, or the only one findable
+ * from either directory.
+ */
+describe('the fullest file wins', () => {
+  const CLI_ID = '00000000-0000-4000-8000-0000000000f1';
+  const SHARED = '00000000-0000-4000-8000-0000000000f2';
+  const TREE_ONLY_A = '00000000-0000-4000-8000-0000000000f3';
+  const TREE_ONLY_B = '00000000-0000-4000-8000-0000000000f4';
+  const REPO_ONLY = '00000000-0000-4000-8000-0000000000f5';
+  const REPO_ONLY_B = '00000000-0000-4000-8000-0000000000f7';
+  const HERE_ID = '00000000-0000-4000-8000-0000000000f8';
+  const ORIGIN_ID = '00000000-0000-4000-8000-0000000000f6';
+  const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
+  const REPO = 'C:\\work\\project';
+
+  function rec(uuid: string) {
+    return { uuid, type: 'assistant' };
+  }
+
+  /** Writes one of the conversation's files, named the way the app names them. */
+  function transcript(configDir: string, project: string, uuids: string[]): void {
+    const dir = path.join(configDir, 'projects', project);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `${CLI_ID}.jsonl`),
+      uuids.map((uuid) => JSON.stringify(rec(uuid))).join('\n'),
+      'utf8',
+    );
+  }
+
+  it('sends the copy to the worktree file when it holds more records than the repository', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-'));
+    // Both hold the shared history; the worktree's file also holds two records
+    // the repository's does not, so it is the fuller of the two.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [
+      SHARED,
+      TREE_ONLY_A,
+      TREE_ONLY_B,
+    ]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+
+    // The old, unconditional choice: dropping the worktree lease also sends the
+    // copy to `originCwd`. Sending it there here would open the two-record
+    // file and leave `TREE_ONLY_A`/`TREE_ONLY_B` behind.
+    expect(copy.cwd).toBe(TREE);
+    expect(copy.worktreePath).toBeUndefined();
+    expect(copy.worktreeName).toBeUndefined();
+  });
+
+  it('opens nothing from the repository at all when only the worktree can reach it', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-empty-'));
+    // Two files exist for this conversation — the worktree's, and one under a
+    // directory that is neither `cwd` nor `originCwd` (a second worktree the
+    // card no longer names) — so `originCwd` matches none of them. Sending the
+    // copy there unconditionally would have opened an empty row.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project--claude-worktrees-other', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: TREE, originCwd: REPO }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(copy.cwd).toBe(TREE);
+  });
+
+  /**
+   * "Fuller" is measured against the destination, not by file size. Measured
+   * 2026-09-15: the repository's file was the bigger one (4872 records to
+   * 4802) and the destination already held the card that opens it; the
+   * worktree's file held 2116 records — a night's work — nothing there could
+   * open. Sending the copy to the bigger file found nothing beyond what was
+   * here, and the card was skipped as already in this account.
+   */
+  it('sends the copy to the smaller file when it holds what no row here opens', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-beyond-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    // The destination's own card, opening the repository's — bigger — file.
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_ID, cliSessionId: CLI_ID, cwd: REPO, originCwd: REPO }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    // The one record only the worktree's file holds is what the copy is for.
+    expect(outcome!.beyond).toBe(1);
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(copy.cwd).toBe(TREE);
+  });
+
+  it('brings the worktree file of a conversation whose earlier copy the ledger vouches for', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-vouched-'));
+    // Copied while the two files still agreed: the copy lands in the
+    // repository, and the ledger records it.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED]);
+    transcript(configDir, 'C--work-project', [SHARED]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+    const [first] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(first!.status).toBe('fostered');
+    expect((JSON.parse(readFileSync(first!.copyPath!, 'utf8')) as CodeSessionData).cwd).toBe(REPO);
+
+    // Then both went on: the copy here, in the repository's file, for longer;
+    // the source's own card, in the worktree's file, for a night.
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+
+    const [again] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    // Identity vouched for a copy that cannot show the night's work: a second
+    // row, opening the worktree's file, rather than "already in this account".
+    expect(again!.status).toBe('fostered');
+    expect(again!.beyond).toBe(1);
+    const second = JSON.parse(readFileSync(again!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(second.cwd).toBe(TREE);
+    expect(second.sessionId).not.toBe(first!.copySessionId);
+
+    // And once, not once per run: the worktree's file is reached now.
+    const [third] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(third!.status).toBe('skipped');
+  });
+
+  it('still sends the copy to the repository when its own file is the fuller one', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-repo-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(copy.cwd).toBe(REPO);
+  });
+
+  /**
+   * Both files hold records the other lacks and the destination has
+   * nothing yet. One copy opens one file, so the first run used to bring the
+   * fuller one and leave the other to a second run.
+   */
+  it('brings both files of a worktree card in one run when each holds work of its own', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-both-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fostered', 'fostered']);
+    const cwds = outcomes.map(
+      (outcome) => (JSON.parse(readFileSync(outcome.copyPath!, 'utf8')) as CodeSessionData).cwd,
+    );
+    expect(cwds).toEqual([REPO, TREE]);
+    // The second row exists for the one record only the worktree's file holds.
+    expect(outcomes[1]!.beyond).toBe(1);
+
+    // And nothing is left for a second run.
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(again.map((outcome) => outcome.status)).toEqual(['skipped']);
+  });
+
+  /**
+   * Ledger-fold fix: `active` used to be keyed on the fostering key, so the
+   * second `fostered` event above overwrote the first in the fold — the older
+   * copy stayed on disk but dropped out of `listActive` forever, and `return`
+   * could never reach it. Measured against the real ledger: 275 `fostered`
+   * events overwrote a still-active key this way. Now both copies stay
+   * tracked, and both come back when the fostering is undone.
+   */
+  it('both copies of a second-file fostering stay active, and both are returned', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-both-return-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fostered', 'fostered']);
+
+    const active = listActive(project(ledger.read()));
+    expect(active).toHaveLength(2);
+    expect(new Set(active.map((f) => f.copySessionId))).toEqual(
+      new Set(outcomes.map((outcome) => outcome.copySessionId)),
+    );
+
+    const returned = returnFosterings(active, { store, ledger, guard: noGuard });
+    expect(returned.every((outcome) => outcome.status === 'returned')).toBe(true);
+    for (const outcome of outcomes) expect(existsSync(outcome.copyPath!)).toBe(false);
+    expect(listActive(project(ledger.read()))).toHaveLength(0);
+  });
+
+  it('plans the second file in a dry run too', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-both-dry-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      projectsDirs,
+      dryRun: true,
+    });
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fostered', 'fostered']);
+  });
+});

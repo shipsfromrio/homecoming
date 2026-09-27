@@ -1,0 +1,437 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { buildFosterCopy } from '../src/domain/fostering.js';
+import { accountDir } from '../src/domain/paths.js';
+import {
+  scanAccount,
+  ScanCache,
+  scanSources,
+  scanStore,
+  SESSION_FILE_MAX_BYTES,
+  summarise,
+} from '../src/store/scanner.js';
+import { applyFilter } from '../src/domain/filter.js';
+import { readConfig } from '../src/store/config.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
+
+describe('scanAccount', () => {
+  it('finds sessions and binds them to the directory they live in', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-00000000001a' }),
+    );
+
+    const found = scanAccount(store, OLD_ACCOUNT);
+
+    expect(found).toHaveLength(1);
+    expect(found[0]!.account).toEqual(OLD_ACCOUNT);
+  });
+
+  it('skips malformed files instead of failing the whole scan', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+    const dir = accountDir(store, OLD_ACCOUNT);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'local_broken.json'), '{ not json', 'utf8');
+
+    expect(scanAccount(store, OLD_ACCOUNT)).toHaveLength(1);
+  });
+
+  it('names a malformed card in options.unreadable instead of only dropping it silently', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+    const dir = accountDir(store, OLD_ACCOUNT);
+    mkdirSync(dir, { recursive: true });
+    const broken = path.join(dir, 'local_broken.json');
+    writeFileSync(broken, '{ not json', 'utf8');
+
+    const unreadable: string[] = [];
+    const found = scanAccount(store, OLD_ACCOUNT, undefined, { unreadable });
+
+    expect(found).toHaveLength(1);
+    expect(unreadable).toEqual([broken]);
+  });
+
+  it('names an unreadable card the same way when a ScanCache is in play', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+    const dir = accountDir(store, OLD_ACCOUNT);
+    mkdirSync(dir, { recursive: true });
+    const broken = path.join(dir, 'local_broken.json');
+    writeFileSync(broken, '{ not json', 'utf8');
+
+    const unreadable: string[] = [];
+    const found = scanAccount(store, OLD_ACCOUNT, undefined, {
+      slim: true,
+      cache: new ScanCache(),
+      unreadable,
+    });
+
+    expect(found).toHaveLength(1);
+    expect(unreadable).toEqual([broken]);
+  });
+
+  it('skips valid JSON that is not a session, and still loads the neighbor', () => {
+    const store = makeStore();
+    const good = writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-00000000001c' }),
+    );
+    const dir = accountDir(store, OLD_ACCOUNT);
+    writeFileSync(path.join(dir, 'local_notes.json'), JSON.stringify({ title: 'no id' }), 'utf8');
+
+    const found = scanAccount(store, OLD_ACCOUNT);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.path).toBe(good);
+  });
+
+  it('ignores tombstones and unrelated files', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+    const dir = accountDir(store, OLD_ACCOUNT);
+    writeFileSync(path.join(dir, 'deleted_00000000-0000-4000-8000-00000000001b'), '123', 'utf8');
+    writeFileSync(path.join(dir, 'notes.txt'), 'x', 'utf8');
+
+    expect(scanAccount(store, OLD_ACCOUNT)).toHaveLength(1);
+  });
+});
+
+describe('copy classification', () => {
+  it('recognises a fostered copy so a rescan does not treat it as a new discovery', () => {
+    const store = makeStore();
+    const origin = session({ sessionId: '00000000-0000-4000-8000-00000000002a' });
+    writeSession(store, OLD_ACCOUNT, origin);
+    writeSession(store, NEW_ACCOUNT, buildFosterCopy(origin, { origin: OLD_ACCOUNT }));
+
+    const all = scanStore(store);
+    const copies = all.filter((s) => s.isCopy);
+    const natives = all.filter((s) => !s.isCopy);
+
+    expect(natives).toHaveLength(1);
+    expect(copies).toHaveLength(1);
+    // The copy still points back at its true origin, not at the folder it sits in.
+    expect(copies[0]!.data._foster?.originAccountUuid).toBe(OLD_ACCOUNT.accountUuid);
+    expect(copies[0]!.account).toEqual(NEW_ACCOUNT);
+  });
+
+  it('never offers a copy for fostering again', () => {
+    const store = makeStore();
+    const origin = session();
+    writeSession(store, NEW_ACCOUNT, buildFosterCopy(origin, { origin: OLD_ACCOUNT }));
+
+    const [copy] = scanAccount(store, NEW_ACCOUNT);
+    expect(copy!.reasons).toContain('already-a-copy');
+  });
+});
+
+describe('summarise', () => {
+  it('counts natives and copies per account and flags the current one', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-00000000003a' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-00000000003b' }),
+    );
+    writeSession(store, NEW_ACCOUNT, buildFosterCopy(session(), { origin: OLD_ACCOUNT }));
+
+    const summary = summarise(store, NEW_ACCOUNT.accountUuid);
+    const oldSummary = summary.find((s) => s.account.accountUuid === OLD_ACCOUNT.accountUuid);
+    const newSummary = summary.find((s) => s.account.accountUuid === NEW_ACCOUNT.accountUuid);
+
+    expect(oldSummary).toMatchObject({ nativeCount: 2, copyCount: 0, isCurrent: false });
+    expect(newSummary).toMatchObject({ nativeCount: 0, copyCount: 1, isCurrent: true });
+  });
+});
+
+describe('readConfig', () => {
+  it('reads the current account pointer and ignores everything sensitive', () => {
+    const store = makeStore();
+    writeFileSync(
+      store.configFile,
+      JSON.stringify({
+        lastKnownAccountUuid: NEW_ACCOUNT.accountUuid,
+        locale: 'pt-BR',
+        'oauth:tokenCache': 'SHOULD-NEVER-BE-READ',
+        'oauth:tokenCacheV2': 'SHOULD-NEVER-BE-READ',
+      }),
+      'utf8',
+    );
+
+    const config = readConfig(store);
+
+    expect(config.lastKnownAccountUuid).toBe(NEW_ACCOUNT.accountUuid);
+    expect(config.locale).toBe('pt-BR');
+    expect(config).not.toHaveProperty('hasTokenCache');
+    expect(JSON.stringify(config)).not.toContain('SHOULD-NEVER-BE-READ');
+  });
+
+  it('reads plain settings that sit beside a token and does not copy the token out', () => {
+    const store = makeStore();
+    const sentinel = 'SHOULD-NEVER-BE-READ-fdd93c2b8a1e';
+    writeFileSync(
+      store.configFile,
+      `{
+        "oauth:tokenCacheV2": "pre\\"${sentinel}",
+        "oauth:tokenCache": { "access": "${sentinel}", "items": ["${sentinel}"] },
+        "lastKnownAccountUuid": ${JSON.stringify(NEW_ACCOUNT.accountUuid)},
+        "locale": "en-\\u0055S",
+        "updaterLastSeenVersion": "1.2.3",
+        "preferences": { "menuBarEnabled": false, "note": "${sentinel}" },
+        "count": 0
+      }`,
+      'utf8',
+    );
+
+    const config = readConfig(store);
+
+    expect(config).toEqual({
+      lastKnownAccountUuid: NEW_ACCOUNT.accountUuid,
+      locale: 'en-US',
+      updaterLastSeenVersion: '1.2.3',
+      menuBarEnabled: false,
+    });
+    expect(JSON.stringify(config)).not.toContain(sentinel);
+  });
+
+  it('returns empty rather than throwing when there is no config, or it is not JSON', () => {
+    expect(readConfig(makeStore())).toEqual({});
+    const broken = makeStore();
+    writeFileSync(broken.configFile, '{', 'utf8');
+    expect(readConfig(broken)).toEqual({});
+  });
+});
+
+describe('the app’s own size limit', () => {
+  it('excludes a session too big for the app to load', () => {
+    const store = makeStore();
+    const big = session({ sessionId: '00000000-0000-4000-8000-0000000000f1' });
+    // Padded past the 10 MB the app refuses to read. Copying it would write a
+    // file the app skips in silence.
+    big.padding = 'x'.repeat(SESSION_FILE_MAX_BYTES);
+    writeSession(store, OLD_ACCOUNT, big);
+
+    const [found] = scanAccount(store, OLD_ACCOUNT);
+    expect(found!.reasons).toContain('too-large');
+  });
+
+  it('leaves an ordinary session alone', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+
+    const [found] = scanAccount(store, OLD_ACCOUNT);
+    expect(found!.reasons).not.toContain('too-large');
+  });
+});
+
+describe('a copy that is the last card its conversation has', () => {
+  const CONVERSATION = '00000000-0000-4000-8000-0000000000e1';
+
+  /** A copy in NEW_ACCOUNT of a session belonging to OLD_ACCOUNT. */
+  function copyOf(store: ReturnType<typeof makeStore>, origin: ReturnType<typeof session>) {
+    return writeSession(store, NEW_ACCOUNT, buildFosterCopy(origin, { origin: OLD_ACCOUNT }));
+  }
+
+  it('stays out of the running while the original is still there', () => {
+    const store = makeStore();
+    const origin = session({ sessionId: CONVERSATION });
+    writeSession(store, OLD_ACCOUNT, origin);
+    copyOf(store, origin);
+
+    const copy = scanStore(store).find((found) => found.isCopy)!;
+    expect(copy.isStranded).toBe(false);
+    expect(copy.reasons).toContain('already-a-copy');
+    // Fostering it would put a second copy of a conversation that is reachable
+    // the ordinary way.
+    expect(applyFilter(scanStore(store), {})).toHaveLength(1);
+  });
+
+  it('becomes a source once the original is gone', () => {
+    // What restore leaves behind, and what deleting an origin card produces: a
+    // conversation whose only card anywhere is homecoming's own copy. Refusing it
+    // does not keep anything tidy — it strands the conversation for good.
+    const store = makeStore();
+    copyOf(store, session({ sessionId: CONVERSATION }));
+
+    const [copy] = scanStore(store);
+
+    expect(copy!.isCopy).toBe(true);
+    expect(copy!.isStranded).toBe(true);
+    expect(copy!.reasons).toEqual([]);
+    expect(applyFilter(scanStore(store), {})).toHaveLength(1);
+  });
+
+  it('keeps every reason that is about the file rather than the copying', () => {
+    const store = makeStore();
+    copyOf(store, session({ sessionId: CONVERSATION, isArchived: true }));
+
+    const [copy] = scanStore(store);
+
+    expect(copy!.isStranded).toBe(true);
+    expect(copy!.reasons).toEqual(['archived']);
+  });
+
+  it('is judged across accounts, not within one', () => {
+    // The original sits in an account the sweep is not reading. Deciding from
+    // the source account alone would call the copy stranded and duplicate it.
+    const store = makeStore();
+    const origin = session({ sessionId: CONVERSATION });
+    writeSession(store, OLD_ACCOUNT, origin);
+    copyOf(store, origin);
+
+    expect(scanAccount(store, NEW_ACCOUNT)[0]!.isStranded).toBe(false);
+    expect(scanSources(store, [NEW_ACCOUNT])[0]!.isStranded).toBe(false);
+  });
+
+  it('does not strand a copy just because another copy shares the conversation', () => {
+    const store = makeStore();
+    const origin = session({ sessionId: CONVERSATION });
+    copyOf(store, origin);
+    copyOf(store, origin);
+
+    // Both are copies and neither conversation has an own card: both are the
+    // last card, and the destination check is what stops the pair.
+    expect(scanStore(store).every((found) => found.isStranded)).toBe(true);
+  });
+});
+
+/**
+ * `ScanCache` — the sweep's own re-scans (`ops/sweep.ts`, `engine/layout.ts`,
+ * `engine/dates.ts`) share one of these across a run, so a file a scan already
+ * read is served from memory rather than read and `JSON.parse`d again, unless
+ * its `mtime`/`size` say it changed since.
+ */
+describe('ScanCache', () => {
+  it('serves a card unchanged since it was cached, without reading it again', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c1', title: 'First' }),
+    );
+    const cache = new ScanCache();
+
+    const first = scanAccount(store, OLD_ACCOUNT, undefined, { cache })[0]!;
+    const second = scanAccount(store, OLD_ACCOUNT, undefined, { cache })[0]!;
+
+    // Identity, not just equality: the second scan handed back the very same
+    // parsed object the first one cached — proof the file was not read and
+    // `JSON.parse`d a second time, since nothing on disk moved in between.
+    expect(second.data).toBe(first.data);
+    expect(second.data.title).toBe('First');
+  });
+
+  it('re-reads a card whose mtime or size has moved since it was cached', () => {
+    const store = makeStore();
+    const file = writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c2', title: 'Before' }),
+    );
+    const cache = new ScanCache();
+
+    scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...JSON.parse(readFileSync(file, 'utf8')),
+        title: 'After',
+      }),
+      'utf8',
+    );
+
+    const [found] = scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+    expect(found!.data.title).toBe('After');
+  });
+
+  it('a slim read can be served from a cache entry read whole', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000c3',
+        remoteMcpServersConfig: 'bulky',
+      }),
+    );
+    const cache = new ScanCache();
+
+    // First, a whole read — the field is still there.
+    const whole = scanAccount(store, OLD_ACCOUNT, undefined, { cache })[0]!;
+    expect(whole.data.remoteMcpServersConfig).toBe('bulky');
+    expect(whole.slim).toBeUndefined();
+
+    // Then a slim request against the same cache: served from the whole entry
+    // rather than read again, so the field a slim read would normally drop is
+    // still there — a superset is a correct answer to "give me at least this".
+    const [slimAsked] = scanAccount(store, OLD_ACCOUNT, undefined, { cache, slim: true });
+    expect(slimAsked!.data.remoteMcpServersConfig).toBe('bulky');
+  });
+
+  it('a whole read is never served from a cache entry read slim', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000c4',
+        remoteMcpServersConfig: 'bulky',
+      }),
+    );
+    const cache = new ScanCache();
+
+    const [slim] = scanAccount(store, OLD_ACCOUNT, undefined, { cache, slim: true });
+    expect(slim!.data.remoteMcpServersConfig).toBeUndefined();
+    expect(slim!.slim).toBe(true);
+
+    // A later whole request must not be handed the slim entry's incomplete
+    // data — it has to read the file again to get the field back.
+    const [whole] = scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+    expect(whole!.data.remoteMcpServersConfig).toBe('bulky');
+    expect(whole!.slim).toBeUndefined();
+  });
+
+  it('drops a card that has been deleted since it was cached', () => {
+    const store = makeStore();
+    const file = writeSession(store, OLD_ACCOUNT, session());
+    const cache = new ScanCache();
+
+    expect(scanAccount(store, OLD_ACCOUNT, undefined, { cache })).toHaveLength(1);
+
+    rmSync(file);
+
+    expect(scanAccount(store, OLD_ACCOUNT, undefined, { cache })).toHaveLength(0);
+  });
+
+  it('never serves one account’s cache to another — same cache instance, two directories', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c5', title: 'Old account' }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c6', title: 'New account' }),
+    );
+    const cache = new ScanCache();
+
+    const old = scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+    const fresh = scanAccount(store, NEW_ACCOUNT, undefined, { cache });
+
+    expect(old).toHaveLength(1);
+    expect(fresh).toHaveLength(1);
+    expect(old[0]!.data.title).toBe('Old account');
+    expect(fresh[0]!.data.title).toBe('New account');
+  });
+});

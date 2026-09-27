@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # Lets the whole pipeline be exercised without publishing anything.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Create the GitHub release (leave off to only build and verify)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # vitest 5 (picked up to clear high-severity advisories) requires
+          # Node ^22.12.0 || ^24.0.0 || >=26.0.0 and will not start under 20 —
+          # see ci.yml's `check` job for the same reasoning. package.json's
+          # own "engines" stays >=20: that floor describes the built CLI,
+          # which carries no such requirement, not this pipeline.
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # The installer pins the release it downloads, and every copy homecoming writes
+      # is stamped with its build version. A tag whose tree disagrees with either
+      # would install the wrong bundle or mislabel its own output, so it never
+      # reaches the release step.
+      - name: Verify the version matches the tag
+        run: node scripts/version.mjs check "${GITHUB_REF_NAME}"
+        if: startsWith(github.ref, 'refs/tags/')
+
+      - name: Verify the version is self-consistent
+        run: node scripts/version.mjs check
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      # The same two gates ci.yml enforces. A release used to run a plain
+      # `npm test` and no privacy guard, so a tag could publish what CI would
+      # have refused: a personal identifier in the tree, or a coverage drop.
+      - name: Privacy guard
+        run: node scripts/privacy.mjs
+        env:
+          PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+          # A release never ships without the name check.
+          PRIVACY_REQUIRE_DENYLIST: '1'
+      - name: Tests with the coverage floor
+        run: npm run coverage
+
+      - run: npm run build
+
+      # A bundle that cannot start is worse than no release: the output is a
+      # single file assembled by the bundler, and packaging mistakes (a stray
+      # shebang, an unshimmed require) only surface when it is actually executed.
+      # Same script ci.yml runs on every PR and push now, so the two cannot drift.
+      - name: Smoke-test the bundle
+        run: scripts/smoke-bundle.sh
+
+      - name: Generate checksum
+        working-directory: dist
+        run: sha256sum homecoming.js > homecoming.js.sha256
+
+      # The library a plugin installs: homecoming is not on npm, so the README
+      # points at this tarball, attached to the release below.
+      - name: Pack the library tarball
+        run: npm pack
+
+      # On a tag push the release is that tag. On a manual run GITHUB_REF_NAME is
+      # the branch (for example `main`), so the tag is the one the tree already
+      # declares: version.mjs has just checked that every file agrees on it.
+      - name: Resolve the release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Release tag: ${tag}"
+
+      # Written on every run, dry runs included: a manual run with publish=true
+      # needs the file as much as a tag push does, and writing it always means a
+      # dry run exercises this step too.
+      - name: Write release notes
+        env:
+          tag: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<NOTES
+          Bring Claude Desktop **Code** sessions from a previous local account back into the sidebar of the account you are signed into now, without moving or modifying the originals.
+
+          Not affiliated with, endorsed by, or supported by Anthropic.
+
+          ## Install
+
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${tag}/install.ps1 | iex
+          \`\`\`
+
+          The installer downloads \`homecoming.js\` from this release and verifies its SHA256 against \`homecoming.js.sha256\` before installing anything. Requires Node.js 20 or newer.
+
+          ## Safety
+
+          - The originals are never modified; fostering only adds files to the current account's folder.
+          - \`foster\`, \`sweep\`, \`restore\`, \`return\` and \`purge\` are dry runs unless you pass \`--yes\`.
+          - Adding copies works while Claude Desktop is open. Removing them refuses for copies a running app has already loaded, since deleting one it holds in memory only makes it write the file back.
+          - \`purge\` destroys conversations on disk and cannot be undone. It takes \`--confirm <count>\` as well as \`--yes\`, and only ever considers conversations whose session the app has already deleted and that nothing still points at.
+          - It never reads a credential or a cookie store and never signs anyone in. The one network request is the daily release check, which \`FOSTER_NO_UPDATE_CHECK=1\` turns off.
+
+          Changes appear after you restart Claude Desktop: the sidebar is built at startup and does not watch the directory.
+          NOTES
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # install.ps1 ships as an asset so that
+          # /releases/latest/download/install.ps1 always serves the newest
+          # installer. That URL is stable, which means anything pointing at it
+          # never needs updating for a new release — and the integrity story is
+          # unchanged, because the installer pins the tag it was published from
+          # and verifies the bundle against that release's checksum.
+          #
+          # A tag push publishes the tag that triggered it, and --verify-tag
+          # refuses if that tag is somehow gone. A manual run has no tag yet:
+          # gh creates it at the exact commit this job built and verified.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            where=(--verify-tag)
+          else
+            where=(--target "${GITHUB_SHA}")
+          fi
+          gh release create "${TAG}" \
+            dist/homecoming.js dist/homecoming.js.sha256 install.ps1 \
+            homecoming-*.tgz \
+            --title "homecoming ${TAG}" \
+            --notes-file release-notes.md \
+            "${where[@]}"
+
+      - name: Report what a dry run produced
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && !inputs.publish }}
+        run: |
+          echo "Dry run: everything verified, nothing published."
+          ls -l dist/
+          cat dist/homecoming.js.sha256

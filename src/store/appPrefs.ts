@@ -1,0 +1,461 @@
+import { readFileSync } from 'node:fs';
+import type { AccountRef, StoreLayout } from '../domain/types.js';
+import type { Unregister } from '../extensions.js';
+import type { BackupOptions } from '../util/backups.js';
+import { asObject, rewriteDesktopConfig } from './desktopConfig.js';
+
+/**
+ * The Claude Desktop preferences homecoming knows how to read and write.
+ *
+ * They live in `claude_desktop_config.json` — the file that also carries the MCP
+ * server list — under a top-level `preferences` object. A preference that has
+ * never been changed is simply absent, so "what is this set to" and "what has
+ * somebody set" are two different questions, and both are worth answering
+ * separately.
+ *
+ * `kind` and `choices` constrain a value, and `fallback` is what an absent key
+ * means. The table is not a promise that the app still honours a given
+ * preference — the app is free to drop one and leave the default behind — and
+ * it is not a list of what is safe to write: see `guard`, which homecoming
+ * refuses to write unless a plugin's allowlist names that preference.
+ */
+
+export type PrefKind = 'boolean' | 'string' | 'number' | 'enum' | 'list' | 'map' | 'object';
+
+export interface PrefSpec {
+  kind: PrefKind | 'unknown';
+  /** What the app uses when the preference is absent. */
+  fallback: unknown;
+  /** The closed set of values, where the schema defines one. */
+  choices?: string[];
+  /**
+   * A guard the app puts in the way on purpose — permission bypasses, consent
+   * records, trusted folder lists, private-network allowances, full computer
+   * control.
+   *
+   * A refusal. homecoming reads these and never writes them: each one is a
+   * decision the app asks the signed-in person to make on its own screen, with
+   * the explanation that goes with it, and a write from outside would record an
+   * agreement nobody gave. `writeAppPref` throws on them, so the rule holds for
+   * the library as well as for `homecoming app pref`.
+   */
+  guard?: boolean;
+}
+
+export const APP_PREFS = {
+  allowAllBrowserActions: { kind: 'boolean', fallback: false, guard: true },
+  bypassPermissionsGateByAccount: { kind: 'map', fallback: {}, guard: true },
+  bypassPermissionsModeEnabled: { kind: 'boolean', fallback: false, guard: true },
+  bypassPermissionsOptInByAccount: { kind: 'map', fallback: {}, guard: true },
+  ccAutoArchiveInactiveDays: { kind: 'number', fallback: 0 },
+  ccAutoArchiveOnPrClose: { kind: 'boolean', fallback: false },
+  ccBranchPrefix: { kind: 'string', fallback: 'claude' },
+  ccKeepAwakeOnBattery: { kind: 'boolean', fallback: true },
+  ccKeepAwakeWhileWorking: { kind: 'boolean', fallback: true },
+  ccMaxWarmWorktrees: { kind: 'number', fallback: 3 },
+  ccRemoteControlDefaultEnabled: { kind: 'boolean', fallback: null },
+  ccWorktreeReapAfterHours: { kind: 'number', fallback: 24 },
+  ccdScheduledTasksEnabled: { kind: 'boolean', fallback: false },
+  chicagoAutoUnhide: { kind: 'boolean', fallback: true },
+  chicagoBackgroundIntroSeen: { kind: 'boolean', fallback: false },
+  chicagoEnabled: { kind: 'boolean', fallback: false, guard: true },
+  chicagoPreferredMode: {
+    kind: 'enum',
+    fallback: 'background',
+    choices: ['background', 'full_control'],
+    guard: true,
+  },
+  chicagoUserDeniedBundleIds: { kind: 'list', fallback: [] },
+  chillingSlothLocation: { kind: 'unknown', fallback: 'default' },
+  chromeExtension: { kind: 'object', fallback: {} },
+  chromeExtensionEnabled: { kind: 'boolean', fallback: true },
+  claudeAndroidEmulatorAccessEnabled: { kind: 'boolean', fallback: true },
+  claudeIosSimulatorAccessEnabled: { kind: 'boolean', fallback: true },
+  coworkBrowserToolsEnabled: { kind: 'boolean', fallback: true },
+  coworkDisabledTools: { kind: 'list', fallback: [] },
+  coworkHipaaRestricted: { kind: 'boolean', fallback: false, guard: true },
+  coworkLegacyRootGrantsPruned: { kind: 'boolean', fallback: false },
+  coworkModelAutoFallbackByAccount: { kind: 'map', fallback: {} },
+  coworkOnboardingResumeStep: { kind: 'object', fallback: null },
+  coworkPreferredBrowser: { kind: 'enum', fallback: 'built_in', choices: ['built_in', 'chrome'] },
+  coworkProjectsToolProvenFor: { kind: 'string', fallback: null },
+  coworkScheduledTasksEnabled: { kind: 'boolean', fallback: false },
+  coworkSpaceContextEnabled: { kind: 'boolean', fallback: false },
+  coworkWebSearchEnabled: { kind: 'boolean', fallback: true },
+  dispatchCodeTasksPermissionMode: {
+    kind: 'enum',
+    fallback: 'acceptEdits',
+    choices: ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'],
+    guard: true,
+  },
+  dispatchTrustedCodeWorkspaces: { kind: 'list', fallback: [], guard: true },
+  dockBounceEnabled: { kind: 'boolean', fallback: false },
+  earlyWindowShowLatched: { kind: 'boolean', fallback: false },
+  epitaxyPrefs: { kind: 'map', fallback: {} },
+  folderTccProbeResults: { kind: 'object', fallback: {} },
+  growthBookHybridAuthedOrigins: { kind: 'list', fallback: [], guard: true },
+  hardwareBuddyEnabled: { kind: 'boolean', fallback: false },
+  hybridDetectLatched: { kind: 'boolean', fallback: false },
+  installSourceLanding: { kind: 'unknown', fallback: null },
+  keepAwakeEnabled: { kind: 'boolean', fallback: false },
+  launchChromeImportPrompt: {
+    kind: 'enum',
+    fallback: 'pending',
+    choices: ['pending', 'dismissed', 'done'],
+  },
+  launchEnabled: { kind: 'boolean', fallback: true },
+  launchPreviewAllowedDomainTransitions: { kind: 'list', fallback: [], guard: true },
+  launchPreviewAllowedOrigins: { kind: 'list', fallback: [], guard: true },
+  launchPreviewPersistedWorkspaces: { kind: 'list', fallback: [] },
+  launchPreviewPrivateNetworkReadOrigins: { kind: 'list', fallback: [], guard: true },
+  launchPreviewPrivateNetworkReadPins: { kind: 'map', fallback: {}, guard: true },
+  launchPreviewPrivateNetworkTrustPins: { kind: 'map', fallback: {}, guard: true },
+  launchPreviewPrivateNetworkTrustedOrigins: { kind: 'list', fallback: [], guard: true },
+  launchPreviewSessionScopedSessions: { kind: 'list', fallback: [] },
+  launchPreviewStorage: {
+    kind: 'enum',
+    fallback: 'none',
+    choices: ['none', 'shared', 'session'],
+  },
+  legacyQuickEntryEnabled: { kind: 'boolean', fallback: true },
+  localAgentModeTrustedFolders: { kind: 'list', fallback: [], guard: true },
+  louderPenguinEnabled: { kind: 'boolean', fallback: false },
+  menuBarEnabled: { kind: 'boolean', fallback: true },
+  notificationLevels: { kind: 'object', fallback: {} },
+  notificationSound: { kind: 'enum', fallback: 'system', choices: ['system', 'none'] },
+  orgWorkAcrossAppsDisabled: { kind: 'boolean', fallback: false, guard: true },
+  plushRaccoonEnabled: { kind: 'boolean', fallback: false },
+  plushRaccoonOption1: { kind: 'unknown', fallback: 'off' },
+  plushRaccoonOption2: { kind: 'unknown', fallback: 'off' },
+  plushRaccoonOption3: { kind: 'unknown', fallback: 'off' },
+  previewJitlessKillSwitchEngaged: { kind: 'boolean', fallback: false, guard: true },
+  quickEntryDictationShortcut: { kind: 'unknown', fallback: 'off' },
+  quickEntryShortcut: { kind: 'unknown', fallback: 'double-tap-option' },
+  quietPenguinEnabled: { kind: 'boolean', fallback: false },
+  remoteControlExcludedFolders: { kind: 'list', fallback: [] },
+  remoteControlPinnedFolders: { kind: 'list', fallback: [] },
+  remoteControlSpawnMode: { kind: 'enum', fallback: 'same-dir', choices: ['same-dir', 'worktree'] },
+  remoteControlStayReachable: { kind: 'boolean', fallback: false },
+  remoteFolderConsentMemory: { kind: 'list', fallback: [], guard: true },
+  remoteSessionFolderGrants: { kind: 'map', fallback: {}, guard: true },
+  remoteToolsDeviceName: { kind: 'string', fallback: '' },
+  routineFolderGrants: { kind: 'map', fallback: {}, guard: true },
+  rubberDuckEnabled: { kind: 'boolean', fallback: false },
+  secureVmFeaturesEnabled: { kind: 'boolean', fallback: true, guard: true },
+  sidebarMode: {
+    kind: 'enum',
+    fallback: 'chat',
+    choices: ['chat', 'code', 'task', 'epitaxy'],
+  },
+  simulatorDeviceConsent: { kind: 'map', fallback: {}, guard: true },
+  vmCpuCount: { kind: 'number', fallback: 0 },
+  vmMemoryGB: { kind: 'number', fallback: 0 },
+  wakeSchedulerApprovedThisCycle: { kind: 'boolean', fallback: false, guard: true },
+  wakeSchedulerCourtesyFlippedKeepAwake: { kind: 'boolean', fallback: false },
+  wakeSchedulerDisableEmitted: { kind: 'boolean', fallback: false },
+  wakeSchedulerEnabled: { kind: 'boolean', fallback: false },
+  wakeSchedulerRegisteredAtVersion: { kind: 'string', fallback: '' },
+} satisfies Record<string, PrefSpec>;
+
+/**
+ * The spec for a name that came from outside — a command line, or the file.
+ *
+ * `APP_PREFS` keeps its literal keys so that `APP_PREFS.ccBranchPrefix` is a
+ * spec rather than a maybe; a lookup by arbitrary string is the other question,
+ * and it answers `undefined` for a preference this build has never heard of.
+ */
+export function specOf(name: string): PrefSpec | undefined {
+  return (APP_PREFS as Record<string, PrefSpec | undefined>)[name];
+}
+
+export interface PrefReading {
+  name: string;
+  /** What the app will use: the stored value, or the default when none is stored. */
+  value: unknown;
+  /** True when somebody has set this — the file carries it. */
+  stored: boolean;
+  spec: PrefSpec;
+}
+
+function settingsOf(store: StoreLayout): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(store.desktopConfigFile, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const preferences = parsed.preferences;
+    return preferences && typeof preferences === 'object' && !Array.isArray(preferences)
+      ? (preferences as Record<string, unknown>)
+      : {};
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Every preference, or only the ones somebody has set.
+ *
+ * A name the table does not know is still listed when it is stored: the app can
+ * add one at any release, and silently dropping it would make this reader a
+ * worse witness than the file it is reading.
+ */
+/** One preference's effective value — the stored one, or the app's default when none is stored. */
+export function appPrefValue(store: StoreLayout, name: string): unknown {
+  return readAppPrefs(store).find((reading) => reading.name === name)?.value;
+}
+
+/**
+ * Whether the app re-archives this card on its own at startup: `ccAutoArchiveOnPrClose` is on and
+ * the card carries a pull request (`prs`). Measured 26/09/2026: eleven rows `archive_synced`
+ * unarchived were archived again by the app four minutes later, at its next start, every one with
+ * a long-closed PR on the card — un-archiving such a row is a write the app always takes back.
+ */
+export function appArchivesOnPrClose(data: { prs?: unknown }, enabled: boolean): boolean {
+  return enabled && Array.isArray(data.prs) && data.prs.length > 0;
+}
+
+export function readAppPrefs(store: StoreLayout, all = false): PrefReading[] {
+  const stored = settingsOf(store) ?? {};
+  const names = all
+    ? [...new Set([...Object.keys(APP_PREFS), ...Object.keys(stored)])].sort()
+    : Object.keys(stored).sort();
+
+  return names.map((name) => {
+    const spec = specOf(name) ?? { kind: 'unknown' as const, fallback: undefined };
+    const has = Object.hasOwn(stored, name);
+    return { name, value: has ? stored[name] : spec.fallback, stored: has, spec };
+  });
+}
+
+export type PrefParse = { ok: true; value: unknown } | { ok: false; reason: string };
+
+/**
+ * The typed value behind what somebody typed on a command line.
+ *
+ * Strict on purpose, and against the app's own schema: a preference written with
+ * the wrong type is not a foster problem, it is a file the app may reject or
+ * read as something else. `unknown` kinds — a union the schema builds out of
+ * literals and objects both — take JSON and nothing else, because guessing which
+ * half was meant is exactly the kind of help that corrupts a setting.
+ */
+export function parsePrefValue(spec: PrefSpec, text: string): PrefParse {
+  switch (spec.kind) {
+    case 'boolean': {
+      if (text === 'true') return { ok: true, value: true };
+      if (text === 'false') return { ok: true, value: false };
+      return { ok: false, reason: 'expects true or false' };
+    }
+    case 'number': {
+      const n = Number(text);
+      if (!Number.isFinite(n)) return { ok: false, reason: 'expects a number' };
+      return { ok: true, value: n };
+    }
+    case 'string':
+      return { ok: true, value: text };
+    case 'enum': {
+      if (spec.choices?.includes(text)) return { ok: true, value: text };
+      return { ok: false, reason: `expects one of: ${spec.choices?.join(', ') ?? '(unknown)'}` };
+    }
+    default: {
+      try {
+        return { ok: true, value: JSON.parse(text) };
+      } catch {
+        return { ok: false, reason: 'expects JSON' };
+      }
+    }
+  }
+}
+
+/**
+ * Guarded preference names one plugin may write. The core's allowlist is
+ * empty: organization policy, compliance and approval preferences are refused
+ * until a plugin names them, and naming one does not open the rest.
+ */
+export interface AppPrefAllowlist {
+  name: string;
+  keys: readonly string[];
+}
+
+const appPrefAllowlists: AppPrefAllowlist[] = [];
+
+/** Registers an allowlist. Returns a function that removes it again. */
+export function registerAppPrefAllowlist(list: AppPrefAllowlist): Unregister {
+  appPrefAllowlists.push(list);
+  return () => {
+    const at = appPrefAllowlists.indexOf(list);
+    if (at >= 0) appPrefAllowlists.splice(at, 1);
+  };
+}
+
+function prefAllowed(name: string): boolean {
+  return appPrefAllowlists.some((list) => list.keys.includes(name));
+}
+
+/**
+ * Throws when any of `names` is a preference the app guards (see
+ * `PrefSpec.guard`) and no registered allowlist names it. Called before
+ * anything is read or written, so a refused change leaves the file, and the
+ * app, exactly as they were.
+ */
+export function refuseGuarded(names: readonly string[]): void {
+  const guarded = names.filter((name) => specOf(name)?.guard && !prefAllowed(name));
+  if (guarded.length === 0) return;
+  throw new Error(
+    `refusing to write ${guarded.join(', ')}: ${guarded.length === 1 ? 'it is' : 'they are'} ` +
+      'one of the settings Claude Desktop asks you to decide on its own screen (permissions, ' +
+      'consent, organization policy, compliance, an approval, trusted folders, ' +
+      'private-network access or computer control). homecoming reads these but never writes ' +
+      'them; change it in the app.',
+  );
+}
+
+export interface PrefWrite {
+  name: string;
+  from: unknown;
+  to: unknown;
+  /** True when the write removes the key, letting the app's default take over. */
+  unset: boolean;
+}
+
+export interface PrefWriteResult {
+  write: PrefWrite;
+  backup: string;
+}
+
+/**
+ * Write one preference, and nothing else.
+ *
+ * The neighbours are the point. This file holds the MCP server list and every
+ * other preference the app has ever been given, so the write goes through
+ * `rewriteDesktopConfig` — the one rewrite path it shares with
+ * `groupScopes.ts` and `viewPrefs.ts` — never a round trip through a shell's
+ * JSON support, which was measured turning `"...710Z"` into `"...71Z"` in
+ * untouched keys. The result is compared key by key against what was read
+ * before it is allowed to replace the original, and a raw number literal a
+ * `JSON.parse`/`stringify` round trip would silently rewrite (see
+ * `util/jsonNumbers.ts`) refuses the write before any of that. Anything else
+ * moved, and the write is refused with the file untouched.
+ *
+ * A backup is written first regardless, under `~/.foster/backups` — see
+ * `util/backups.ts` — because the one failure this cannot check for is the
+ * one nobody predicted.
+ */
+export function writeAppPref(
+  store: StoreLayout,
+  name: string,
+  value: unknown,
+  options: { unset?: boolean } & BackupOptions = {},
+): PrefWriteResult {
+  refuseGuarded([name]);
+  let from: unknown;
+  const { backup } = rewriteDesktopConfig(
+    store,
+    'appPref',
+    [['preferences', name]],
+    (after) => {
+      const preferences = asObject(after.preferences);
+      after.preferences = preferences;
+      from = Object.hasOwn(preferences, name) ? preferences[name] : specOf(name)?.fallback;
+      if (options.unset) delete preferences[name];
+      else preferences[name] = value;
+    },
+    options,
+  );
+
+  return {
+    write: {
+      name,
+      from,
+      to: options.unset ? specOf(name)?.fallback : value,
+      unset: Boolean(options.unset),
+    },
+    backup,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// `homecoming layout`'s carry of the preferences keyed *by account uuid*
+// rather than by name. Each is a map from an accountUuid to whatever that
+// account has set, so "carry this preference" here means "copy one entry of
+// the map", never the whole preference: the map already holds every
+// account's own entry side by side, and copying one disturbs no other.
+//
+// Only a convenience setting travels. `bypassPermissionsGateByAccount` and
+// `bypassPermissionsOptInByAccount` are the app's record that one account's
+// user consented to running without permission prompts. Consent to a safety
+// bypass is given per account, in the app, by the person signed in; copying
+// it would switch the bypass on in an account where nobody ever agreed to it.
+// They are listed here so the refusal is explicit, and
+// `writeAccountPrefsCarry` rejects them even when a caller hands them in.
+// ---------------------------------------------------------------------------
+
+export const ACCOUNT_KEYED_PREFS = ['coworkModelAutoFallbackByAccount'] as const;
+
+/** Account-keyed preferences that record a safety consent, and so never travel. */
+export const NEVER_CARRIED_ACCOUNT_PREFS = [
+  'bypassPermissionsGateByAccount',
+  'bypassPermissionsOptInByAccount',
+] as const;
+
+export interface AccountPrefCarryPlan {
+  from?: AccountRef;
+  /** Pref name -> the value to set under the target's own accountUuid entry. */
+  changes: Record<string, unknown>;
+}
+
+/**
+ * Which of the carried maps the target has no entry in yet, and the source
+ * (the most recently active *other* account, chosen by the caller — see
+ * `engine/layout.ts`'s `mostRecentlyActiveOtherAccount`) has one for. Nothing
+ * here decides which account is "most recent"; that is a question about
+ * cards, not about preferences, so it stays out of this module.
+ */
+export function planAccountPrefsCarry(
+  store: StoreLayout,
+  target: AccountRef,
+  source: AccountRef | undefined,
+): AccountPrefCarryPlan {
+  if (!source) return { changes: {} };
+  const stored = settingsOf(store) ?? {};
+  const changes: Record<string, unknown> = {};
+  for (const name of ACCOUNT_KEYED_PREFS) {
+    const map = stored[name];
+    const record =
+      map && typeof map === 'object' && !Array.isArray(map) ? (map as Record<string, unknown>) : {};
+    if (Object.hasOwn(record, target.accountUuid)) continue; // target already has its own entry
+    if (!Object.hasOwn(record, source.accountUuid)) continue; // source has nothing to give
+    changes[name] = record[source.accountUuid];
+  }
+  return Object.keys(changes).length > 0 ? { from: source, changes } : { changes: {} };
+}
+
+export function writeAccountPrefsCarry(
+  store: StoreLayout,
+  target: AccountRef,
+  changes: Record<string, unknown>,
+  options: BackupOptions = {},
+): { backup: string } {
+  const carried: readonly string[] = ACCOUNT_KEYED_PREFS;
+  const refused = Object.keys(changes).filter((name) => !carried.includes(name));
+  if (refused.length > 0) {
+    throw new Error(
+      `refusing to copy ${refused.join(', ')} between accounts: only ${carried.join(', ')} ` +
+        'is carried, and a safety consent is never inherited',
+    );
+  }
+  return rewriteDesktopConfig(
+    store,
+    'accountPrefsCarry',
+    Object.keys(changes).map((name) => ['preferences', name]),
+    (after) => {
+      const preferences = asObject(after.preferences);
+      for (const [name, value] of Object.entries(changes)) {
+        const map = asObject(preferences[name]);
+        map[target.accountUuid] = value;
+        preferences[name] = map;
+      }
+      after.preferences = preferences;
+    },
+    options,
+  );
+}

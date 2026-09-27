@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-labelledby="t d">
+  <title id="t">homecoming</title>
+  <desc id="d">Sessions from a previous local Claude Desktop account brought into the account in use now.</desc>
+  <style>
+    .bg { fill: #f6f8fa; stroke: #d0d7de; }
+    .card { fill: #ffffff; stroke: #d0d7de; }
+    .row { fill: #d0d7de; }
+    .row-hot { fill: #117a72; }
+    .ink { fill: #1f2328; }
+    .muted { fill: #59636e; }
+    .flow { stroke: #117a72; fill: none; }
+    .dot { fill: #117a72; }
+    .badge { fill: #e6f4f2; stroke: #117a72; }
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; stroke: #30363d; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .row { fill: #30363d; }
+      .row-hot { fill: #3dd6c6; }
+      .flow { stroke: #3dd6c6; }
+      .dot { fill: #3dd6c6; }
+      .ink { fill: #e6edf3; }
+      .muted { fill: #9198a1; }
+      .badge { fill: #10302d; stroke: #3dd6c6; }
+    }
+  </style>
+
+  <rect class="bg" x="1" y="1" width="1198" height="318" rx="18" stroke-width="2"/>
+
+  <!-- Left: the previous local account, with its sessions -->
+  <g stroke-width="2">
+    <rect class="card" x="48" y="80" width="190" height="160" rx="12"/>
+    <text class="muted" x="66" y="108" font-size="14" font-weight="600">previous account</text>
+    <rect class="row" x="66" y="126" width="140" height="10" rx="5"/>
+    <rect class="row" x="66" y="148" width="104" height="10" rx="5"/>
+    <rect class="row" x="66" y="170" width="126" height="10" rx="5"/>
+    <rect class="row" x="66" y="192" width="92" height="10" rx="5"/>
+  </g>
+
+  <!-- One flow into the account in use -->
+  <g class="flow" stroke-width="3" stroke-linecap="round">
+    <path d="M242 160 L 372 160"/>
+  </g>
+  <circle class="dot" cx="378" cy="160" r="7"/>
+
+  <!-- Middle: the account in use now -->
+  <g stroke-width="2">
+    <rect class="card" x="392" y="40" width="236" height="240" rx="12"/>
+    <text class="ink" x="412" y="70" font-size="15" font-weight="700">current account</text>
+    <rect class="row-hot" x="412" y="88" width="190" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="110" width="150" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="132" width="176" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="154" width="128" height="10" rx="5"/>
+    <rect class="row" x="412" y="176" width="164" height="10" rx="5"/>
+    <rect class="row" x="412" y="198" width="140" height="10" rx="5"/>
+    <rect class="badge" x="412" y="226" width="196" height="34" rx="8"/>
+    <text class="ink" x="426" y="248" font-size="13" font-weight="600">Nothing is left to sweep</text>
+  </g>
+
+  <!-- Right: name and tagline -->
+  <text class="ink" x="680" y="150" font-size="72" font-weight="800" letter-spacing="-1">homecoming</text>
+  <text class="muted" x="684" y="192" font-size="20">Your Claude Desktop Code sessions,</text>
+  <text class="muted" x="684" y="220" font-size="20">back in the account you use now.</text>
+  <text class="muted" x="684" y="262" font-size="14">sweep &#183; layout &#183; where &#183; verify &#183; revive</text>
+</svg>

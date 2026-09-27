@@ -1,0 +1,718 @@
+import { existsSync, mkdirSync } from 'node:fs';
+import { buildFosterCopy, copyCwd, DEFAULT_PREFIX, fosteringKey } from '../domain/fostering.js';
+import { accountDir, sessionPath } from '../domain/paths.js';
+import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
+import type { Ledger } from '../ledger/log.js';
+import { copySessionIds, project } from '../ledger/project.js';
+import type { ActiveFostering } from '../ledger/types.js';
+import { blockingReasons } from '../domain/filter.js';
+import { withBulkyFields } from '../store/sessionFile.js';
+import { errorMessage } from '../util/fs.js';
+
+import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
+import { lineage, lineageAt, worktreeReachOf, type Lineage } from './lineage.js';
+import { BRANCH_HERE, sidebarOf, type BranchStanding, type Sidebar } from './sidebar.js';
+import { inspectCopy } from './reconcile.js';
+import { assertRemovable, type RemovalGuard } from './safety.js';
+
+export interface FosterOptions {
+  store: StoreLayout;
+  ledger: Ledger;
+  target: AccountRef;
+  /**
+   * Where the sessions were read from, when that is not `store`. Recorded on the
+   * copy so a cross-profile origin stays locatable.
+   */
+  sourceStore?: string;
+  prefix?: string;
+  /** When true, compute the plan without writing anything. */
+  dryRun?: boolean;
+  /**
+   * True when the caller named these sessions one by one rather than sweeping a
+   * whole account. Only an explicit choice brings back a copy the user deleted in
+   * the app: a bulk run that resurrected it would undo their decision.
+   */
+  explicit?: boolean;
+  /**
+   * Accept a session the user archived. The copy keeps the flag, so it arrives
+   * in the destination's archived view rather than quietly reappearing in
+   * Recents — bringing the conversation across is the point, not undoing the
+   * decision to tuck it away.
+   */
+  includeArchived?: boolean;
+  /**
+   * Accept a scheduled task's conversation. The copy arrives without the task id
+   * — see buildFosterCopy — so it is an ordinary row rather than a file the app
+   * never lists.
+   *
+   * Has to be forwarded here as well as to the scan: this re-judges every session
+   * with the same function, and an option the caller passed to only one of the
+   * two turns "available" into "skipped" between one screen and the next.
+   */
+  includeScheduled?: boolean;
+  /**
+   * Accept a conversation the app spawned from a background-task chip. Forwarded
+   * here for the same reason the one above is: this re-judges every session, and
+   * an option that reached only the scan turns "available" into "skipped"
+   * between one screen and the next.
+   */
+  includeSpawned?: boolean;
+  /**
+   * Conversations a live `claude` process is writing right now, lower-cased.
+   *
+   * Not a gate — fostering one is perfectly sound, and it is the common case when
+   * you copy the session you are working in. It changes what is *said*: a copy of
+   * a conversation with a live writer branches the moment it is opened, which is
+   * the one outcome that looks like foster losing work. Injected rather than
+   * read here so the engine stays free of process inspection.
+   */
+  live?: ReadonlySet<string>;
+  /**
+   * Where to look for transcripts, which is how a branch is recognised. Injected
+   * so a test can point at its own tree; production reads the real one.
+   */
+  env?: NodeJS.ProcessEnv;
+  /** Transcript `projects/` directories. Wins over `env` when both are given. */
+  projectsDirs?: string[];
+  /**
+   * A lineage the caller already built. Wins over both of the above: the sweep
+   * runs several passes over one store, and each pass building its own meant
+   * the same transcripts were read once per pass.
+   */
+  kin?: Lineage;
+  /**
+   * The destination already read, for the same reason. The run marks what it
+   * plans into it, so a caller's next pass sees this one's copies.
+   */
+  here?: Sidebar;
+  /**
+   * Accept a session whose conversation the destination already shows a
+   * *branch* of — never an exact copy of. This is the sweep's branch pass, which
+   * gives every branch of a fork a row of its own. Narrower than `explicit`:
+   * that one also brings back a copy the user deleted in the app, and a bulk
+   * pass must not.
+   */
+  acceptBranches?: boolean;
+  /**
+   * Write the copies archived whatever their source says, and record that it
+   * was homecoming's decision. The branch that stopped goes to the archived view.
+   */
+  archive?: boolean;
+  /**
+   * The template `prefix`'s mark was made from, `{when}` unfilled — set by the
+   * branch pass when it brings a copy in with a mark already in front of its
+   * title. Recorded on the `fostered` event so a later run recognises the mark
+   * whatever words it is itself given — see `templatesSeen` in `domain/stale.ts`.
+   */
+  template?: string;
+}
+
+export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
+
+/**
+ * "Fostered" is homecoming's word for the act, not for the state, and on a row the
+ * account already holds it was read as "did not bring it" — twice in one session,
+ * on conversations that were sitting in the sidebar the whole time. The report
+ * says where the row is, not what the run did to it.
+ */
+export const ALREADY_HERE = 'already in this account';
+
+/**
+ * Said out loud because it looks like nothing happened and something did: the
+ * copy this account already has is the one that carried on.
+ */
+export const FOLLOWED_BRANCH = `${ALREADY_HERE}; the app branched it and the copy here follows the branch`;
+
+export interface Outcome {
+  originSessionId: string;
+  title: string;
+  status: OutcomeStatus;
+  /** Present for skipped and failed entries. */
+  detail?: string;
+  copyPath?: string;
+  /**
+   * The conversation this copy holds, when a live process is still writing it.
+   * Carried rather than flagged so the caller can name the writer: "finish there"
+   * is not actionable without knowing where there is.
+   */
+  live?: string;
+  /**
+   * Set on a session refused because the destination already shows a branch of
+   * it. Weighed here rather than by the caller because the engine is holding the
+   * per-run transcript cache; the caller would reread whole transcripts to say
+   * the same thing.
+   */
+  standing?: BranchStanding;
+  /**
+   * Records this copy opens that no row in the destination could reach — the
+   * reason a card was brought for a conversation the account already shows.
+   */
+  beyond?: number;
+  /**
+   * The title the copy was written with, when one was. `title` is the origin's;
+   * the two differ by the prefix, and a branch pass names the stale rows by it.
+   */
+  copyTitle?: string;
+  /**
+   * The copy's own session id, when one was minted — the id the app will show
+   * this row under. The branch pass needs it to know which row a moved pin
+   * should now point at when the branch that carried on had no row here yet.
+   */
+  copySessionId?: string;
+}
+
+/**
+ * Foster a batch of sessions into the target account.
+ *
+ * Each session is independent: a failure part-way through a few hundred does not
+ * roll back what already succeeded, and the caller gets a per-session report.
+ * Re-running is a no-op for anything already fostered, which is why the check is
+ * keyed on the origin session rather than on a file (every copy gets a new id).
+ */
+export function fosterSessions(sessions: DiscoveredSession[], options: FosterOptions): Outcome[] {
+  const { store, ledger, target, dryRun = false, explicit = false } = options;
+  const prefix = options.prefix ?? DEFAULT_PREFIX;
+  const state = project(ledger.read());
+  const outcomes: Outcome[] = [];
+  // The projection is a snapshot, so keys minted during this batch are tracked
+  // here too: the same origin session can appear twice in one run when it exists
+  // under two account directories, and without this both would be copied while
+  // the ledger fold kept only the last one — orphaning the first file.
+  const mintedInBatch = new Set<string>();
+  // What the destination already shows, keyed by conversation rather than by
+  // session id. A conversation belongs to no account — it is one transcript that
+  // any account can hold a card for — so the destination can perfectly well have
+  // its own card for the very conversation being fostered, made when the same
+  // work was resumed under this account. The fostering key cannot see that: the
+  // origin is the *other* account's card, and it has never been fostered before.
+  // The result is two rows for one conversation, differing only in which account
+  // watched which part of it. Both are live, both are openable, and the sidebar
+  // gives no hint they are the same.
+  //
+  // Keyed by branch as well, because the id is exactly what a branch changes: the
+  // pair this check exists to prevent is most often made *by* the branch, one
+  // account holding the conversation and the other holding what it forked into.
+  const kin =
+    options.kin ?? (options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(options.env));
+  const here = options.here ?? sidebarOf(store, target, copySessionIds(ledger.read()), kin);
+
+  // No gate here on purpose. Every copy gets a session id the app has never seen,
+  // so a running app neither reads nor writes the file: it is invisible to the
+  // app until the app next initialises, and cannot collide with anything the app
+  // holds. See safety.ts for why removal is the asymmetric case.
+  if (!dryRun && sessions.length > 0) mkdirSync(accountDir(store, target), { recursive: true });
+
+  for (const session of sessions) {
+    const title = session.data.title ?? '(untitled)';
+    const originId = session.data.sessionId;
+    // Read once per session and reused everywhere `copyCwd` is asked below —
+    // the existing-copy check, the "opens more than here can reach" check, and
+    // the write itself — so all three agree on which of the source's two
+    // directories the copy would open in. Measured against `here`, so the
+    // directory chosen is the one whose file holds what this account cannot
+    // reach — not merely the bigger file, which can be the one it already opens.
+    const reach = worktreeReachOf(kin, session.data, here);
+
+    // Judged the same way the filter judges it, so a session the caller was
+    // shown as available cannot be refused here for the reason it was shown
+    // despite — reach included: a copy offered because it carried on past what
+    // this account can reach is not refused here as "already a copy".
+    const blocking = blockingReasons(
+      session,
+      {
+        includeArchived: options.includeArchived,
+        includeScheduled: options.includeScheduled,
+        includeSpawned: options.includeSpawned,
+      },
+      { here, cwd: copyCwd(session.data, reach) },
+    );
+    if (blocking.length > 0) {
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'skipped',
+        detail: blocking.join(', '),
+      });
+      continue;
+    }
+
+    // Keyed on the conversation the origin card holds *now*. An origin card the
+    // app has branched since is a card for different work, and the fostering
+    // recorded against it says nothing about the conversation it holds today.
+    const key = fosteringKey(originId, target, session.data.cliSessionId);
+    if (mintedInBatch.has(key)) {
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'skipped',
+        detail: ALREADY_HERE,
+      });
+      continue;
+    }
+
+    // Every copy filed under this key — ordinarily one, but the second-file path below
+    // (the second-file `bring()` a few dozen lines down) can leave two active at
+    // once, and both have to be asked before falling through to a fresh copy.
+    // The legacy key is folded in too, so a fostering written before the
+    // conversation was recorded still answers for the card it was made from.
+    const activeCopyIds = new Set<string>([
+      ...(state.activeByKey.get(key) ?? []),
+      ...(session.data.cliSessionId
+        ? (state.activeByKey.get(fosteringKey(originId, target)) ?? [])
+        : []),
+    ]);
+    if (activeCopyIds.size > 0) {
+      let skip: Pick<Outcome, 'status' | 'detail' | 'copyPath'> | undefined;
+      for (const copyId of activeCopyIds) {
+        const active = state.active.get(copyId);
+        if (!active) continue;
+        skip = resolveExisting(active, {
+          explicit,
+          dryRun,
+          ledger,
+          kin,
+          here,
+          cliSessionId: session.data.cliSessionId,
+          cwd: copyCwd(session.data, reach),
+        });
+        // The first copy that still counts as active settles it: a second copy
+        // is only ever worth making when nothing already here reaches its work.
+        if (skip) break;
+      }
+      if (skip) {
+        outcomes.push({ originSessionId: originId, title, ...skip });
+        continue;
+      }
+      // Reconciled — none of the copies filed under this key still count as
+      // active, so fall through and make the copy the caller asked for. Local
+      // to this run only, same as the single-copy case always was: a real
+      // `returned` event was appended above for whichever copies needed one,
+      // and this is just what keeps the rest of this batch from re-asking.
+      for (const copyId of activeCopyIds) state.active.delete(copyId);
+      state.activeByKey.delete(key);
+      state.activeByKey.delete(fosteringKey(originId, target));
+    }
+
+    // Asked after the ledger, which knows about homecoming's own copies, and about
+    // the destination rather than about anything homecoming has done: a conversation
+    // already showing here would gain a second row for the same work.
+    const cliSessionId = session.data.cliSessionId;
+    const shownHere = here.reason(cliSessionId);
+    // A branch pass lifts only the branch answer. An exact copy stays refused:
+    // two cards opening one transcript is the duplicate this check exists for.
+    const branchAccepted =
+      options.acceptBranches === true &&
+      shownHere !== undefined &&
+      shownHere.startsWith(BRANCH_HERE);
+    /**
+     * Records this copy would open that nothing here can.
+     *
+     * The refusal above rests on two cards opening one transcript, which is what
+     * makes the second one worthless. That is not always true: one
+     * `cliSessionId` can name several files, the app opens the one under the
+     * project directory for the card's working directory, and an account can
+     * therefore show a row for a conversation while being unable to reach most
+     * of it. Measured on this store: 47 (account, conversation) pairs where
+     * another account held the card that opens the fuller file, 8159 records
+     * between them, and the refusal was the only thing standing in the way.
+     *
+     * Asked of the working directory the *copy* will have, not the source's:
+     * a card in a worktree is rewritten to open in the repository it was cut
+     * from, so asking the source would promise records the copy does not open.
+     */
+    const beyond = here.unreached(cliSessionId, copyCwd(session.data, reach));
+    if (shownHere !== undefined && !explicit && !branchAccepted && beyond === 0) {
+      // Only a branch is worth weighing. Two cards for the *same* conversation
+      // open the same transcript, so there is no half to be on the wrong side of.
+      const standing = shownHere.startsWith(BRANCH_HERE) ? here.standing(cliSessionId) : undefined;
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'skipped',
+        detail: shownHere,
+        ...(standing ? { standing } : {}),
+      });
+      continue;
+    }
+
+    // Carried on the outcome rather than acted on: the copy is sound either way,
+    // and what a live writer changes is only what the caller should be told.
+    const liveFlag =
+      cliSessionId && options.live?.has(cliSessionId.toLowerCase()) ? { live: cliSessionId } : {};
+
+    const first = bring(
+      session,
+      key,
+      reach,
+      shownHere !== undefined && beyond > 0 ? beyond : undefined,
+      liveFlag,
+    );
+
+    /**
+     * The other of the card's two directories, asked once the first copy is planned.
+     *
+     * A card cut from a worktree sits between two files — the worktree's and the
+     * repository's — and one copy opens only one of them. When both hold records
+     * nothing here reaches, the first copy takes whichever reaches more and the
+     * rest waited for the next run: measured on a real store, 21 cards came
+     * in a second sweep, each from the same origin card as a copy the first sweep
+     * had just made, with between 6 and 2116 records only the other file held.
+     * Asked again now, against a sidebar that already counts the first copy, the
+     * same measurement that picked the first directory points at the other one.
+     */
+    if (first) {
+      const again = worktreeReachOf(kin, session.data, here);
+      const otherCwd = copyCwd(session.data, again);
+      if (otherCwd !== copyCwd(session.data, reach)) {
+        const more = here.unreached(cliSessionId, otherCwd);
+        if (more > 0) bring(session, key, again, more, liveFlag);
+      }
+    }
+  }
+
+  return outcomes;
+
+  /**
+   * Writes one copy of `session` and records it — or, in a dry run, only plans
+   * it. False when the write failed.
+   *
+   * `beyond` is only worth saying when the row was already here: everywhere else
+   * the whole conversation is new and "records nothing here reaches" is every
+   * record.
+   */
+  function bring(
+    session: DiscoveredSession,
+    key: string,
+    reach: ReturnType<typeof worktreeReachOf>,
+    beyond: number | undefined,
+    liveFlag: { live?: string },
+  ): boolean {
+    const originId = session.data.sessionId;
+    const title = session.data.title ?? '(untitled)';
+    // A dry run writes nothing, so what the scan kept is enough to plan with; a
+    // write copies every field across, the bulky ones the scan left out included.
+    const copy = buildFosterCopy(dryRun ? session.data : withBulkyFields(session), {
+      origin: session.account,
+      ...(options.sourceStore && options.sourceStore !== store.root
+        ? { originStore: options.sourceStore }
+        : {}),
+      prefix,
+      ...(options.archive ? { archived: true } : {}),
+      reach,
+    });
+    const copyPath = sessionPath(store, target, copy.sessionId);
+    const beyondFlag = beyond === undefined ? {} : { beyond };
+
+    /**
+     * What this batch has committed to bringing, whether or not bytes are being
+     * written. Two things can make one run reach the same destination twice: the
+     * same origin session found under two account directories, and two different
+     * cards holding one conversation.
+     */
+    const recordPlanned = (): void => {
+      mintedInBatch.add(key);
+      // Tracked as a conversation too: a sweep across two source accounts that
+      // both hold a card for one conversation would otherwise pass this check
+      // twice and produce the pair itself, in a single run.
+      if (copy.cliSessionId) {
+        here.markPlanned(copy.cliSessionId, copy.cwd);
+      }
+    };
+
+    if (dryRun) {
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'fostered',
+        copyPath,
+        copyTitle: copy.title,
+        copySessionId: copy.sessionId,
+        ...liveFlag,
+        ...beyondFlag,
+      });
+      // A dry run has to make the same marks a real one does, or it stops
+      // describing the real one. Both of these are batch state, and leaving them
+      // to the write meant a preview counted a second card for a conversation it
+      // had already planned to bring — listing one row per source card where the
+      // write produces one row per conversation.
+      recordPlanned();
+      return true;
+    }
+
+    try {
+      // The write happens first, and only a completed write is recorded.
+      //
+      // Logging intent up-front would be nicer for forensics, but a failed write
+      // would then leave a "fostered" event that the fold still counts as active
+      // (a "failed" event does not cancel it), so the session would be skipped as
+      // already fostered on every later run, with no file on disk. The reverse
+      // order is self-healing instead: a crash between write and append leaves a
+      // copy that carries its own _foster marker, which the scanner recognises.
+      writeFileAtomic(copyPath, JSON.stringify(copy));
+      ledger.append({
+        kind: 'fostered',
+        originSessionId: originId,
+        origin: session.account,
+        target,
+        copySessionId: copy.sessionId,
+        copyPath,
+        // Recorded verbatim, and left out entirely when the session has no title.
+        // Writing '' instead defeated every `originalTitle ?? fallback` downstream,
+        // because an empty string is not nullish — status and return printed a
+        // blank where they meant to print the session id.
+        ...(session.data.title ? { originalTitle: session.data.title } : {}),
+        // The conversation, which outlives both files and is where the work
+        // actually is. Without it, telling the user that a returned copy had
+        // carried on would mean reading a file that has just been deleted.
+        ...(session.data.cliSessionId ? { cliSessionId: session.data.cliSessionId } : {}),
+        ...(options.sourceStore && options.sourceStore !== store.root
+          ? { originStore: options.sourceStore }
+          : {}),
+        prefix,
+        ...(options.archive ? { archived: true } : {}),
+        ...(options.template ? { template: options.template } : {}),
+      });
+      recordPlanned();
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'fostered',
+        copyPath,
+        copyTitle: copy.title,
+        copySessionId: copy.sessionId,
+        ...liveFlag,
+        ...beyondFlag,
+      });
+      return true;
+    } catch (error) {
+      const reason = errorMessage(error);
+      ledger.append({ kind: 'failed', operation: 'foster', originSessionId: originId, reason });
+      outcomes.push({ originSessionId: originId, title, status: 'failed', detail: reason });
+      return false;
+    }
+  }
+}
+
+/**
+ * What to do about a session the ledger already has an active copy for.
+ *
+ * Returns the outcome fields when the session should be skipped, or nothing when
+ * the ledger has been reconciled and the copy should be made again.
+ *
+ * The distinction that matters is *why* the copy is not there. A copy deleted in
+ * the app was thrown away on purpose, and a bulk run that quietly recreated it
+ * would undo a decision the user made deliberately — so that one is only redone
+ * when the session was named explicitly. A copy that simply is not there any more
+ * was never refused: recreating it is the whole point of the command.
+ */
+function resolveExisting(
+  active: ActiveFostering,
+  context: {
+    explicit: boolean;
+    dryRun: boolean;
+    ledger: Ledger;
+    kin: Lineage;
+    /** The destination, so identity can be checked against reach before it is trusted. */
+    here: Sidebar;
+    /** The conversation the session offered *now* holds — usually the same one `active` names. */
+    cliSessionId: string | undefined;
+    /** Where a fresh copy of the offered session would land, which decides which file it opens. */
+    cwd: string | undefined;
+  },
+): Pick<Outcome, 'status' | 'detail' | 'copyPath'> | undefined {
+  const state = inspectCopy(active);
+
+  if (state.kind === 'present') {
+    // The ledger and the file on disk agree the copy exists, but neither says
+    // which of the conversation's files it opens — a copy made before that union existed
+    // taught fostering to compare files can be the shorter one. Ask the same
+    // question the fresh-session path asks a few lines below the call site:
+    // does the file the offered card would open hold records nothing in the
+    // destination reaches? A "no" is the ordinary case and keeps the refusal;
+    // a "yes" means identity vouched for a copy that cannot show the work, so
+    // this falls through and lets the caller foster a fresh one instead.
+    const beyond = context.here.unreached(context.cliSessionId, context.cwd);
+    if (beyond === 0) {
+      return { status: 'skipped', detail: ALREADY_HERE, copyPath: active.copyPath };
+    }
+    return undefined;
+  }
+
+  if (state.kind === 'unreachable') {
+    // Its installation is not mounted, so absence proves nothing. Deciding it had
+    // gone would put a second copy there the moment the drive came back.
+    return {
+      status: 'skipped',
+      detail: `${ALREADY_HERE}, in an installation that is not reachable to check`,
+      copyPath: active.copyPath,
+    };
+  }
+
+  if (state.kind === 'repurposed') {
+    // Moved onto a branch of the very work it was fostered for. The row is still
+    // there and still shows this piece of work, so there is nothing to replace —
+    // and replacing it is precisely what produced pairs of rows for one piece of
+    // work. Foster follows the card instead, and the fostering goes on tracking
+    // the file it wrote. Which half of the fork the card ended up on is a separate
+    // question, and `consolidate` is where it is asked.
+    if (state.nowHolds && context.kin.sameWork(active.cliSessionId, state.nowHolds)) {
+      if (!context.dryRun) {
+        context.ledger.append({
+          kind: 'fostering_followed',
+          originSessionId: active.originSessionId,
+          target: active.target,
+          copySessionId: active.copySessionId,
+          // Present whenever the state is `repurposed`: the comparison that
+          // produces it reads both sides.
+          from: active.cliSessionId ?? '',
+          to: state.nowHolds,
+        });
+      }
+      return { status: 'skipped', detail: FOLLOWED_BRANCH, copyPath: active.copyPath };
+    }
+
+    // Unrelated work, then. The fostering it recorded no longer stands and a
+    // fresh copy is exactly what the caller is asking for. The file itself is
+    // left alone: the app repointed it, it is a working card for whatever it now
+    // holds, and removing it would delete a row the user can see.
+    if (!context.dryRun) {
+      context.ledger.append({
+        kind: 'returned',
+        originSessionId: active.originSessionId,
+        target: active.target,
+        copySessionId: active.copySessionId,
+        // Not `reconciled`: that one means the file was already gone, and this
+        // file is still there. Recording it as a disappearance would send anyone
+        // reading the log looking for a deletion that never happened.
+        repurposed: true,
+      });
+    }
+    return undefined;
+  }
+
+  if (state.kind === 'deleted-in-app' && !context.explicit) {
+    const when = state.deletedAt
+      ? ` on ${new Date(state.deletedAt).toISOString().slice(0, 10)}`
+      : '';
+    return {
+      status: 'skipped',
+      detail: `deleted in the app${when} — name it with --session to foster it again`,
+    };
+  }
+
+  // Recorded rather than assumed: the ledger keeps saying what happened, and a
+  // 'returned' event homecoming did not perform is marked as the reconciliation it is.
+  if (!context.dryRun) {
+    context.ledger.append({
+      kind: 'returned',
+      originSessionId: active.originSessionId,
+      target: active.target,
+      copySessionId: active.copySessionId,
+      reconciled: true,
+    });
+  }
+  return undefined;
+}
+
+export interface ReturnOptions {
+  store: StoreLayout;
+  ledger: Ledger;
+  dryRun?: boolean;
+  /**
+   * Refuses to delete copies a running app is holding in memory. Injectable so
+   * tests can drive a synthetic store without a real app on the machine deciding
+   * whether they pass; production callers always get the real gate.
+   */
+  guard?: RemovalGuard;
+}
+
+/**
+ * Undo fosterings by deleting the copies.
+ *
+ * homecoming removes the file directly rather than asking the user to delete it in
+ * the app: deleting in the UI leaves tombstones for both the session id and the
+ * shared cliSessionId, which is avoidable noise in the account directory.
+ */
+export function returnFosterings(fosterings: ActiveFostering[], options: ReturnOptions): Outcome[] {
+  const { store, ledger, dryRun = false, guard = assertRemovable } = options;
+  const outcomes: Outcome[] = [];
+
+  if (!dryRun && fosterings.length > 0) guard(store, fosterings);
+
+  for (const fostering of fosterings) {
+    const title = fostering.originalTitle ?? fostering.originSessionId;
+
+    if (dryRun) {
+      outcomes.push({
+        originSessionId: fostering.originSessionId,
+        title,
+        status: 'returned',
+        copyPath: fostering.copyPath,
+      });
+      continue;
+    }
+
+    // Absence is only success when the directory that should hold it says so.
+    // Without this, a profile on an unmounted drive read as "already gone": the
+    // ledger recorded a return that never happened, the file came back with the
+    // drive, and the copy was left in the sidebar with nothing tracking it.
+    if (inspectCopy(fostering).kind === 'unreachable') {
+      outcomes.push({
+        originSessionId: fostering.originSessionId,
+        title,
+        status: 'skipped',
+        detail: 'its installation is not reachable — nothing was removed or recorded',
+        copyPath: fostering.copyPath,
+      });
+      continue;
+    }
+
+    try {
+      // Absence is success: the user may already have deleted the copy in the app.
+      // Presence after a refusal is not: recording `returned` over a path that is
+      // still there would orphan it where nothing looks again.
+      if (!removeSafely(fostering.copyPath) && existsSync(fostering.copyPath)) {
+        throw new Error(`could not remove ${fostering.copyPath}: it is not empty`);
+      }
+      ledger.append({
+        kind: 'returned',
+        originSessionId: fostering.originSessionId,
+        target: fostering.target,
+        copySessionId: fostering.copySessionId,
+      });
+      outcomes.push({
+        originSessionId: fostering.originSessionId,
+        title,
+        status: 'returned',
+        copyPath: fostering.copyPath,
+      });
+    } catch (error) {
+      const reason = errorMessage(error);
+      ledger.append({
+        kind: 'failed',
+        operation: 'return',
+        originSessionId: fostering.originSessionId,
+        reason,
+      });
+      outcomes.push({
+        originSessionId: fostering.originSessionId,
+        title,
+        status: 'failed',
+        detail: reason,
+      });
+    }
+  }
+
+  return outcomes;
+}
+
+export function summariseOutcomes(outcomes: Outcome[]): Record<OutcomeStatus, number> {
+  const counts: Record<OutcomeStatus, number> = {
+    fostered: 0,
+    skipped: 0,
+    failed: 0,
+    returned: 0,
+  };
+  for (const outcome of outcomes) counts[outcome.status] += 1;
+  return counts;
+}

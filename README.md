@@ -1,0 +1,153 @@
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="homecoming: your Claude Desktop Code sessions, back in the account you use now" width="100%"/>
+</p>
+
+# homecoming
+
+Bring Claude Desktop **Code** sessions from a previous local account back into the sidebar of the
+account you are signed into now, without moving or modifying the originals.
+
+> **Not affiliated with, endorsed by, or supported by Anthropic.** "Claude" and "Claude Desktop" are
+> Anthropic's names; this is an independent tool that reads and writes files the desktop app keeps
+> on your own disk.
+
+## Why
+
+Claude Desktop files each Code session under the folder of the account you were signed into. There
+is no account field inside the session, only the folder. Sign into a different account and the
+sidebar starts empty: every conversation is still on disk, intact, and invisible. The transcripts
+themselves are account-agnostic; only a small card has to exist in the right folder.
+[How it works](docs/guide/how-it-works.md).
+
+## What it does
+
+- **`sweep`** copies your sessions from the previous account into this one, archived included,
+  brings back conversations the app deleted that nothing points at, gives each branch of a forked
+  conversation its own row, and re-scans until it can say "Nothing is left to sweep".
+- **`return`** removes the copies again. The originals are never touched: fostering only adds files.
+- **`layout`**, **`pin`** and **`view`** bring sidebar groups, routines, pins and the filter menu along.
+- **`where`**, **`verify`**, **`grep`**, **`export`**, **`revive`**, **`rescue`**, **`disk`** and
+  **`stats`** answer the questions that come after: which row to continue in, whether a restart
+  undid anything, what was said where, which sessions a restart cut off.
+
+34 commands in all (`homecoming --help`), and a guided menu when run with no arguments. The
+commands that change sessions, the sidebar or the app's settings are dry runs until you pass
+`--yes`, and the guided menu asks before it writes. A few act as soon as they run, because acting
+is the whole request: `label` records an account's name in the ledger, `resume` sends one prompt
+into an existing conversation through `claude -p --resume`, `cache clear` deletes the rebuildable
+scan cache, `export --out` writes the file you name, `rescue --open` opens a terminal tab per
+conversation with the resume already running, and `app quit`, `app start` and `app restart`
+do what they say.
+
+## Install
+
+Windows, Node.js 20 or newer:
+
+```powershell
+irm https://github.com/shipsfromrio/homecoming/releases/latest/download/install.ps1 | iex
+```
+
+The installer pins the release tag it was published from and verifies the single-file bundle
+(`homecoming.js`, about 850 KB) against the release's SHA256 before writing anything.
+
+## Quick start
+
+```bash
+homecoming doctor            # which store, which account, is the app running
+homecoming sweep             # dry run: what would come in
+homecoming sweep --yes --restart
+```
+
+Changes appear after Claude Desktop restarts: the sidebar is built at startup.
+
+## Safety
+
+- The originals are never modified. Every completed write is recorded in an append-only ledger
+  (`~/.foster/ledger.jsonl`, or under `FOSTER_HOME`), which is what every undo reads.
+- Removing a copy refuses while a running app holds it, because the app would write it back.
+- `purge` is the one command that destroys data. It needs `--confirm <count>` as well as `--yes`.
+- No credential is extracted, kept, logged, used or sent, no cookie store is opened, and no one is
+  signed in or out. To learn which account is signed in, homecoming reads the account id and a few
+  plain settings from the app's `config.json`. That file also holds the app's cached sign-in token;
+  the core does not read it, and never its value. Whether a token entry is present is left to a
+  plugin (`credentialProbes`). The only network request is a daily release check;
+  `FOSTER_NO_UPDATE_CHECK=1` turns it off.
+
+The long form is in the [safety model](docs/guide/safety-model.md) and the [guide](docs/guide/README.md).
+
+## Extending it
+
+The CLI is also a library. A plugin adds commands, ledger state of its own, store and config
+directory providers, account names, sweep phases, doctor checks, menu entries, revive inclusions,
+preference allowlists and credential probes, without touching the core's files:
+
+```ts
+import { definePlugin, runCli } from 'homecoming';
+
+const hello = definePlugin({
+  name: 'hello',
+  register(program, { print }) {
+    program.command('hello').action(() => print({ hello: 'world' }));
+  },
+  doctorChecks: [{ name: 'Hello', run: () => [{ level: 'ok', message: 'plugin loaded' }] }],
+});
+
+await runCli({ plugins: [hello] });
+```
+
+Every field of a plugin is optional, and each one is also a standalone `register*` function that
+returns an unregister function, for use outside `runCli`:
+
+| Plugin field                 | Standalone                  | What the core does with it                                                                                                                                                |
+| ---------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register(program, context)` | none                        | adds commands, options or hooks to the CLI; `context` resolves the store and ledger a command acts on and prints JSON the way `--json` does                               |
+| `ledgerReducers`             | `registerLedgerReducer`     | folds the plugin's own event kinds into a state slot of its own (`ledgerSlots`, `projectSlot`); events are written with `Ledger.appendRecord`, and core kinds are refused |
+| `storeProviders`             | `registerStoreProvider`     | further installations that `--store`, `stores` and `where` know about                                                                                                     |
+| `configDirProviders`         | `registerConfigDirProvider` | further CLI config directories to read transcripts and live sessions from                                                                                                 |
+| `accountNamers`              | `registerAccountNamer`      | names for accounts nobody labelled                                                                                                                                        |
+| `sweepPhases`                | `registerSweepPhase`        | passes that run after the core sweep passes, on the dry run and after a `--yes` run's writes                                                                              |
+| `doctorChecks`               | `registerDoctorCheck`       | more findings in `doctor`; a check that throws is reported as an error finding                                                                                            |
+| `menuItems`                  | `registerMenuItem`          | entries in the interactive menu                                                                                                                                           |
+| `reviveInclusions`           | `registerReviveInclusion`   | fostered copies `revive` may list; the core lists none, because a copy's stop belongs to the account the conversation ran in                                              |
+| `unstartedSources`           | `registerUnstartedSource`   | further places `unstarted` looks for lost requests; the core looks only in the account signed in                                                                          |
+| `appPrefAllowlists`          | `registerAppPrefAllowlist`  | guarded preference names this plugin may write; the core refuses organization policy, compliance and approval preferences                                                 |
+| `credentialProbes`           | `registerCredentialProbe`   | whether a store's config carries a sign-in token, presence only; the core never looks, and a probe must not return the token                                              |
+
+Everything else under `src/` is internal and may change between minor versions.
+
+homecoming is not published to npm, so `npm install homecoming` does not work. Each release
+attaches the package as a tarball; install that into the project that holds your plugin, and the
+import above resolves:
+
+```bash
+npm install https://github.com/shipsfromrio/homecoming/releases/download/v1.0.0/homecoming-1.0.0.tgz
+```
+
+Or build it from a git checkout of the tag you want: `npm ci && npm run build && npm pack`, then
+`npm install` the `.tgz` it writes. Type declarations ship in `dist/lib`. The contract is pinned by
+`tests/plugin.test.ts`: every extension point is consulted and let go again, a plugin that fails
+to register is reported and exits 1, and its sweep phases run through the `homecoming sweep`
+command, on the dry run and after a `--yes` run's writes. `tests/interactive.test.ts` pins that
+they run in the menu's sweep too. A phase's `lines` are only printed; the menu reads "Nothing to
+sweep" and whether to offer a restart from the `pending` and `changed` counts a phase returns.
+
+## Development
+
+```bash
+npm ci
+npm run check    # typecheck, lint, format, privacy guard, tests with the coverage floor
+npm run build    # dist/homecoming.js (the CLI) and dist/lib (the plugin API)
+```
+
+Measured on this tree: 1,932 tests in 100 files, all against synthetic stores in temporary
+directories (the test setup isolates the home directory, `APPDATA`, `LOCALAPPDATA`,
+`CLAUDE_CONFIG_DIR` and `FOSTER_HOME`, and a test fails if any leaks through); line coverage 73.5%
+over about 41,000 lines of TypeScript. CI runs on Windows and Ubuntu, Node 22 and 24.
+[Development and releasing](docs/guide/development.md).
+
+homecoming was extracted from a private tool of the author's; its development history is not
+included in this repository.
+
+## License
+
+[MIT](LICENSE)

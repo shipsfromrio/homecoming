@@ -1,0 +1,386 @@
+import { existsSync } from 'node:fs';
+import { copyCwd, worktreeClaim } from '../domain/fostering.js';
+import { comparablePath, samePath, storeRootOfCopy } from '../domain/paths.js';
+import type {
+  AccountRef,
+  CodeSessionData,
+  DiscoveredSession,
+  StoreLayout,
+} from '../domain/types.js';
+import type { Ledger } from '../ledger/log.js';
+import { listActive, listWorktreeReleased, project, type LedgerState } from '../ledger/project.js';
+import type { LedgerEvent } from '../ledger/types.js';
+import { readSessionFile } from '../store/sessionFile.js';
+import { errorMessage } from '../util/fs.js';
+import { worktreeReachOf, type Lineage } from './lineage.js';
+import { sidebarFrom, sidebarOf, type Sidebar } from './sidebar.js';
+import { writeFileAtomic } from '../util/fsatomic.js';
+
+/**
+ * Releasing the worktree claim a copy inherited when it was written, before
+ * `buildFosterCopy` learned to drop it (0.38.0). That fix only reaches a
+ * copy being minted from here on; this handles what is already on
+ * disk — measured at 807 copies naming a worktree, 109 of those directories
+ * claimed by more than one live card.
+ *
+ * The write is the same one `buildFosterCopy` would have made at the time: the
+ * three claim fields removed, `cwd` moved to `originCwd` when that is somewhere
+ * else. Everything else on the card — its identity, its title, its dates,
+ * whatever keys the app has added since — is carried through verbatim, the
+ * discipline `repointCards` and `retitleCards` both keep.
+ *
+ * Only copies are ever candidates. `worktreeClaim` cannot tell a copy from a
+ * card the app wrote — the fields look the same either way — so the ledger
+ * decides instead: a candidate is one of the active fosterings it already
+ * tracks, never a card discovered by scanning the store. A native card keeping
+ * a stale claim is the first left-open follow-up, not this one's to touch.
+ *
+ * Neither write here takes a process guard — an idempotent repair, exactly like
+ * `retitleCards`. The app reads the session directory once, at startup, and
+ * holds everything it found in memory from then on; a card it is holding is one
+ * it may write back, in full, the next time something about it changes. A
+ * release that write overwrites is not lost: `planUnclaim` re-derives the claim
+ * from whatever is on disk, so a copy the app hands the fields back to is simply
+ * a copy the next plan finds again, and the next pass — or the next sweep —
+ * releases it a second time. The change becomes visible at the app's next
+ * restart either way, the same as a retitle. `repoint.ts` keeps the guard
+ * because a pointer move racing the app's own write is a move that can be
+ * silently lost with nothing left recording that it should happen again — the
+ * ledger there says "moved", not "keep moving until it holds"; a claim release
+ * has nothing of that kind to race.
+ */
+
+export interface UnclaimItem {
+  path: string;
+  sessionId: string;
+  title: string;
+  worktreePath?: string;
+  worktreeName?: string;
+  worktreeLazy?: unknown;
+  /** The `cwd` the card wears now. */
+  cwdFrom: string | undefined;
+  /** Where `cwd` would move to; undefined when it is already there. */
+  cwdTo?: string;
+}
+
+export interface PlanUnclaimSkipped {
+  /** An active fostering whose copy is no longer on disk. */
+  gone: number;
+  /** A copy on disk that could not be parsed as a session. */
+  unreadable: number;
+  /** A copy read fine and carries no worktree claim at all. */
+  noClaim: number;
+}
+
+export interface PlanUnclaimResult {
+  items: UnclaimItem[];
+  skipped: PlanUnclaimSkipped;
+}
+
+export interface PlanUnclaimOptions {
+  /** Injectable for tests; defaults to reading the file straight off disk. */
+  read?: (path: string) => CodeSessionData | undefined;
+  /**
+   * What each of the copy's two directories would open, so the release moves
+   * `cwd` the same way a copy minted today would choose it. Without it
+   * every release still sends `cwd` to `originCwd`, which is what shipped before
+   * the reach was measurable at all.
+   */
+  kin?: Lineage;
+  /**
+   * The cards of one account, when the caller has already read them — the
+   * sweep has, every account's, and asking `sidebarOf` again re-read the whole
+   * store a second time. Defaults to scanning the account.
+   */
+  cardsOf?: (account: AccountRef) => DiscoveredSession[];
+}
+
+/**
+ * What a release would do, without writing anything.
+ *
+ * Reads only what the ledger already tracks: the active fosterings in this
+ * store. That is what keeps a native card out of reach by construction rather
+ * than by a check that could be wrong — a card the app wrote was never
+ * recorded as a fostering, so it can never appear in `listActive`.
+ */
+export function planUnclaim(
+  store: StoreLayout,
+  ledger: LedgerState | LedgerEvent[],
+  opts: PlanUnclaimOptions = {},
+): PlanUnclaimResult {
+  const state = Array.isArray(ledger) ? project(ledger) : ledger;
+  const read = opts.read ?? readSessionFile;
+  const root = comparablePath(store.root);
+
+  const items: UnclaimItem[] = [];
+  const skipped: PlanUnclaimSkipped = { gone: 0, unreadable: 0, noClaim: 0 };
+
+  // One sidebar per destination account, read when first asked for: the copies
+  // this pass weighs all sit in accounts of this store, and "what does this
+  // account already reach" is a question about the account, not the copy.
+  const copies = new Set(listActive(state).map((fostering) => fostering.copySessionId));
+  const sidebars = new Map<string, Sidebar>();
+  const hereOf = (account: AccountRef, kin: Lineage): Sidebar => {
+    const key = `${account.accountUuid}/${account.organizationUuid}`;
+    let here = sidebars.get(key);
+    if (here === undefined) {
+      here = opts.cardsOf
+        ? sidebarFrom(opts.cardsOf(account), kin)
+        : sidebarOf(store, account, copies, kin);
+      sidebars.set(key, here);
+    }
+    return here;
+  };
+
+  for (const fostering of listActive(state)) {
+    // Only the copies this store holds. The ledger tracks fosterings across
+    // every installation homecoming has ever written into, and a copy sitting in
+    // another profile is not this run's to touch.
+    if (comparablePath(storeRootOfCopy(fostering.copyPath)) !== root) continue;
+
+    // Read first and only then asked whether the file is there at all: a read
+    // that answers settles it, and on a sweep almost every one answers from
+    // cards already in memory, where a stat per copy was a second of its own.
+    const data = read(fostering.copyPath);
+    if (!data) {
+      if (existsSync(fostering.copyPath)) skipped.unreadable += 1;
+      else skipped.gone += 1;
+      continue;
+    }
+
+    const claim = worktreeClaim(data);
+    if (!claim) {
+      skipped.noClaim += 1;
+      continue;
+    }
+
+    // Where the copy should open, asked the one way `buildFosterCopy` asks it.
+    // Moving `cwd` to `originCwd` unconditionally is what this pass did when a
+    // copy could only ever have been written to `originCwd` in the first place;
+    // a copy is minted in whichever of the two directories opens more
+    // of its conversation, and releasing the claim by the old rule undid that
+    // choice in the same sweep that made it. The next run then saw a row that
+    // could not reach what the source offered, copied it again, released it
+    // again, and the pair never settled. What the release is *for* — the
+    // three claim fields, which are what makes two cards fight over one
+    // directory — comes off either way; only the move is now conditional.
+    // Measured against the account the copy sits in, the copy itself left out:
+    // a copy minted in the worktree because that file held what nothing here
+    // reached would otherwise be moved to the bigger repository file by size
+    // alone, and the next sweep would bring the worktree file all over again.
+    const cwdTo = opts.kin
+      ? copyCwd(data, worktreeReachOf(opts.kin, data, hereOf(fostering.target, opts.kin)))
+      : claim.cwdTo;
+    const moves = cwdTo !== undefined && !(data.cwd !== undefined && samePath(cwdTo, data.cwd));
+
+    // With the fields already gone and the directory already where it belongs
+    // there is nothing left to release. `worktreeClaim` still recognises the
+    // card — a `cwd` that is not its `originCwd` is its wider test, and a copy
+    // left in the worktree on purpose keeps that shape for ever — so without
+    // this the same copy is "released" on every run, rewriting a file that does
+    // not change and reporting work that was not done.
+    const fields =
+      claim.worktreePath !== undefined ||
+      claim.worktreeName !== undefined ||
+      claim.worktreeLazy !== undefined;
+    if (!fields && !moves) {
+      skipped.noClaim += 1;
+      continue;
+    }
+
+    items.push({
+      path: fostering.copyPath,
+      sessionId: data.sessionId,
+      title: data.title ?? data.sessionId,
+      ...(claim.worktreePath !== undefined ? { worktreePath: claim.worktreePath } : {}),
+      ...(claim.worktreeName !== undefined ? { worktreeName: claim.worktreeName } : {}),
+      ...(claim.worktreeLazy !== undefined ? { worktreeLazy: claim.worktreeLazy } : {}),
+      cwdFrom: data.cwd,
+      ...(moves ? { cwdTo } : {}),
+    });
+  }
+
+  return { items, skipped };
+}
+
+export interface UnclaimOutcome {
+  path: string;
+  sessionId: string;
+  title: string;
+  status: 'released' | 'skipped' | 'failed';
+  detail?: string;
+  worktreePath?: string;
+  worktreeName?: string;
+  cwdFrom?: string;
+  cwdTo?: string;
+}
+
+export interface ApplyUnclaimOptions {
+  ledger: Ledger;
+}
+
+function describeItem(
+  item: UnclaimItem,
+  status: UnclaimOutcome['status'],
+  detail?: string,
+): UnclaimOutcome {
+  return {
+    path: item.path,
+    sessionId: item.sessionId,
+    title: item.title,
+    status,
+    ...(detail ? { detail } : {}),
+    ...(item.worktreePath !== undefined ? { worktreePath: item.worktreePath } : {}),
+    ...(item.worktreeName !== undefined ? { worktreeName: item.worktreeName } : {}),
+    ...(item.cwdFrom !== undefined ? { cwdFrom: item.cwdFrom } : {}),
+    ...(item.cwdTo !== undefined ? { cwdTo: item.cwdTo } : {}),
+  };
+}
+
+/**
+ * Write the release, one item at a time.
+ *
+ * Same order as `repointCards`: the write happens first, and only a completed
+ * write is recorded, so a crash between the two never leaves the ledger
+ * claiming a release that the file does not show.
+ *
+ * No process guard stands in front of it — see the module doc comment. A card
+ * the app is holding gets the same write everything else here gets; if the app
+ * later saves that card from memory and puts the claim back, the file on disk
+ * is once again one `planUnclaim` finds, so nothing here needs the app to be
+ * closed to make progress, only another pass to finish it.
+ */
+export function applyUnclaim(items: UnclaimItem[], options: ApplyUnclaimOptions): UnclaimOutcome[] {
+  const { ledger } = options;
+  const outcomes: UnclaimOutcome[] = [];
+
+  for (const item of items) {
+    const data = readSessionFile(item.path);
+    if (!data) {
+      outcomes.push(describeItem(item, 'failed', 'the card could not be read'));
+      continue;
+    }
+
+    try {
+      const written: CodeSessionData = { ...data };
+      delete written.worktreePath;
+      delete written.worktreeName;
+      delete written.worktreeLazy;
+      if (item.cwdTo !== undefined) written.cwd = item.cwdTo;
+
+      writeFileAtomic(item.path, JSON.stringify(written));
+      ledger.append({
+        kind: 'worktree_released',
+        path: item.path,
+        sessionId: data.sessionId,
+        ...(item.worktreePath !== undefined ? { worktreePath: item.worktreePath } : {}),
+        ...(item.worktreeName !== undefined ? { worktreeName: item.worktreeName } : {}),
+        ...(item.worktreeLazy !== undefined ? { worktreeLazy: item.worktreeLazy } : {}),
+        ...(item.cwdFrom !== undefined ? { cwdFrom: item.cwdFrom } : {}),
+        ...(item.cwdTo !== undefined ? { cwdTo: item.cwdTo } : {}),
+      });
+      outcomes.push(describeItem(item, 'released'));
+    } catch (error) {
+      const reason = errorMessage(error);
+      ledger.append({ kind: 'failed', operation: 'unclaim', reason });
+      outcomes.push(describeItem(item, 'failed', reason));
+    }
+  }
+
+  return outcomes;
+}
+
+export interface UndoUnclaimOutcome {
+  path: string;
+  sessionId: string;
+  status: 'undone' | 'skipped' | 'failed';
+  detail?: string;
+}
+
+export interface UndoUnclaimOptions {
+  ledger: Ledger;
+  dryRun?: boolean;
+}
+
+/**
+ * Put back what a release removed — only where nothing has moved on since.
+ *
+ * The card has to still be exactly where the release left it: `cwd` reading as
+ * `cwdTo` (or, when the release never moved it, `cwdFrom`) and none of the
+ * three claim fields present. A card that has since been repointed, retitled
+ * into a different `cwd`, or handed a fresh worktree by the app is left alone
+ * and reported rather than overwritten — the same restraint `undoRequests`
+ * takes for granted because a repoint's `from`/`to` are a single field, where
+ * this has four to get right or none at all.
+ *
+ * No process guard here either, for the reason the module doc comment gives:
+ * this is the same idempotent write in the other direction, and the
+ * "moved on" check above is what actually protects a card the app has since
+ * touched — a guard would only add a wait for a hazard this already refuses.
+ */
+export function undoUnclaim(options: UndoUnclaimOptions): UndoUnclaimOutcome[] {
+  const { ledger, dryRun = false } = options;
+  const pending = listWorktreeReleased(project(ledger.read()));
+  const outcomes: UndoUnclaimOutcome[] = [];
+
+  for (const card of pending) {
+    const data = readSessionFile(card.path);
+    if (!data) {
+      outcomes.push({
+        path: card.path,
+        sessionId: card.sessionId,
+        status: 'failed',
+        detail: 'the card could not be read',
+      });
+      continue;
+    }
+
+    const expectedCwd = card.cwdTo ?? card.cwdFrom;
+    const cwdMatches =
+      expectedCwd === undefined
+        ? data.cwd === undefined
+        : typeof data.cwd === 'string' && samePath(data.cwd, expectedCwd);
+    const stillReleased =
+      data.worktreePath === undefined &&
+      data.worktreeName === undefined &&
+      data.worktreeLazy === undefined;
+
+    if (!cwdMatches || !stillReleased) {
+      outcomes.push({
+        path: card.path,
+        sessionId: card.sessionId,
+        status: 'skipped',
+        detail: 'the card moved on since the release',
+      });
+      continue;
+    }
+
+    if (dryRun) {
+      outcomes.push({ path: card.path, sessionId: card.sessionId, status: 'undone' });
+      continue;
+    }
+
+    try {
+      const restored: CodeSessionData = { ...data };
+      if (card.worktreePath !== undefined) restored.worktreePath = card.worktreePath;
+      if (card.worktreeName !== undefined) restored.worktreeName = card.worktreeName;
+      if (card.worktreeLazy !== undefined) restored.worktreeLazy = card.worktreeLazy;
+      if (card.cwdFrom !== undefined) restored.cwd = card.cwdFrom;
+
+      writeFileAtomic(card.path, JSON.stringify(restored));
+      ledger.append({ kind: 'worktree_release_undone', path: card.path });
+      outcomes.push({ path: card.path, sessionId: card.sessionId, status: 'undone' });
+    } catch (error) {
+      const reason = errorMessage(error);
+      ledger.append({ kind: 'failed', operation: 'unclaim-undo', reason });
+      outcomes.push({
+        path: card.path,
+        sessionId: card.sessionId,
+        status: 'failed',
+        detail: reason,
+      });
+    }
+  }
+
+  return outcomes;
+}

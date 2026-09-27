@@ -1,0 +1,71 @@
+{
+  "name": "homecoming",
+  "version": "1.0.0",
+  "description": "Bring Claude Desktop Code sessions from a previous local account back into your current account's sidebar, non-destructively and reversibly. Not affiliated with Anthropic.",
+  "keywords": [
+    "claude-desktop",
+    "claude-code",
+    "sessions",
+    "sidebar",
+    "cli"
+  ],
+  "homepage": "https://github.com/shipsfromrio/homecoming#readme",
+  "bugs": "https://github.com/shipsfromrio/homecoming/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shipsfromrio/homecoming.git"
+  },
+  "license": "MIT",
+  "author": "Caio Figueiroa",
+  "type": "module",
+  "bin": {
+    "homecoming": "dist/homecoming.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/lib/index.d.ts",
+      "import": "./dist/lib/index.js"
+    }
+  },
+  "types": "./dist/lib/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "dev": "tsx src/bin.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "version:check": "node scripts/version.mjs check",
+    "version:set": "node scripts/version.mjs set",
+    "privacy": "node scripts/privacy.mjs",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run privacy && npm run coverage",
+    "equivalence": "tsx scripts/scan-equivalence.ts"
+  },
+  "dependencies": {
+    "commander": "^14.0.1",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@vitest/coverage-v8": "^5.0.1",
+    "eslint": "^9.39.1",
+    "prettier": "^3.9.9",
+    "tsup": "^8.5.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^5.0.1"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  }
+}
