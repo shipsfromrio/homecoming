@@ -76,6 +76,13 @@ export interface PostSweepResult {
   changed?: number;
   /** Merged into `sweep --json` under `phases.<name>`. */
   json?: unknown;
+  /**
+   * Also writes `json` at the top of `sweep --json`, under this key, for a
+   * build whose scripts already read it there. A key the core itself writes
+   * (`fostered`, `prove`, `restart`, `phases`, ...) is never taken: the phase's
+   * JSON is then only under `phases.<name>`.
+   */
+  jsonKey?: string;
   /** Failed writes; any above zero makes a `--yes` run exit 1. */
   failed?: number;
 }

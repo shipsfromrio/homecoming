@@ -305,6 +305,45 @@ describe('a plugin sweep phase, run by the `homecoming sweep` command', () => {
   });
 });
 
+describe('a sweep phase that names a top-level JSON key', () => {
+  // `jsonKey` repeats the phase's JSON at the top of `sweep --json`, for a build
+  // whose scripts read it there, and never over a key the core writes.
+  it('repeats its JSON under the key it names, and never takes a core key', async () => {
+    const swept = makeStore();
+    writeSession(
+      swept,
+      NEW_ACCOUNT,
+      session({ sessionId: '11111111-1111-4111-8111-11111111cccc' }),
+    );
+    writeFileSync(
+      swept.configFile,
+      JSON.stringify({ lastKnownAccountUuid: NEW_ACCOUNT.accountUuid }),
+      'utf8',
+    );
+    const ledgerPath = path.join(
+      mkdtempSync(path.join(tmpdir(), 'homecoming-plugin-k-')),
+      'l.jsonl',
+    );
+    const keyed = definePlugin({
+      name: 'keyed',
+      sweepPhases: [
+        { name: 'keyed', run: () => ({ json: { planned: 2 }, jsonKey: 'keyed' }) },
+        { name: 'greedy', run: () => ({ json: { mine: true }, jsonKey: 'restart' }) },
+      ],
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const global = ['--no-cache', '--store', swept.root, '--ledger', ledgerPath];
+    dispose = await runCli({ plugins: [keyed], argv: [...global, 'sweep', '--json'] });
+    const json = JSON.parse(String(log.mock.calls.at(-1)?.[0])) as Record<string, unknown>;
+    expect(json.keyed).toEqual({ planned: 2 });
+    expect(json.phases).toEqual({ keyed: { planned: 2 }, greedy: { mine: true } });
+    // The core's own `restart` is untouched by a phase that asked for its name.
+    expect(json.restart).not.toEqual({ mine: true });
+    const keys = Object.keys(json);
+    expect(keys.indexOf('keyed')).toBeLessThan(keys.indexOf('phases'));
+  });
+});
+
 describe('runCli and a plugin that fails to register', () => {
   const broken = (where: 'usePlugin' | 'register') =>
     definePlugin({

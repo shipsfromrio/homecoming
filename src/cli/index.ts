@@ -1007,6 +1007,18 @@ async function runSweepCommand(
           ),
         }
       : {};
+  // A phase's JSON repeated at the top under the key it names, never over a
+  // key the core writes (the report's own, `prove`, `phases`, `restart`,
+  // `detach`): the core's output means the same whatever a plugin names.
+  const topLevelOf = (base: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(
+      phases.flatMap((phase) => {
+        const key = phase.result?.jsonKey;
+        if (!key || phase.error || phase.result?.json === undefined) return [];
+        if (key in base || ['phases', 'restart', 'detach'].includes(key)) return [];
+        return [[key, phase.result.json]];
+      }),
+    );
 
   // Named here, not in `sweepRestart` itself: a layout is planned but never
   // applied by the sweep, so the command handed over on a restart has to be
@@ -1033,9 +1045,10 @@ async function runSweepCommand(
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
+      const base = { ...sweepJson(report), ...(proveReport ? { prove: proveReport } : {}) };
       print({
-        ...sweepJson(report),
-        ...(proveReport ? { prove: proveReport } : {}),
+        ...base,
+        ...topLevelOf(base),
         ...phasesJson,
         detach:
           outcome.ok && outcome.plan && outcome.launch
@@ -1062,9 +1075,10 @@ async function runSweepCommand(
       restartCommand,
       deferredSweepGap(store, ledger, target, report),
     );
+    const base = { ...sweepJson(report), ...(proveReport ? { prove: proveReport } : {}) };
     print({
-      ...sweepJson(report),
-      ...(proveReport ? { prove: proveReport } : {}),
+      ...base,
+      ...topLevelOf(base),
       ...phasesJson,
       restart,
     });
