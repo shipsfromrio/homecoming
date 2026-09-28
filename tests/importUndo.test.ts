@@ -44,10 +44,13 @@ function setup(): { store: StoreLayout; ledger: Ledger; names: string[] } {
   return { store, ledger: new Ledger(path.join(store.root, 'ledger.jsonl')), names };
 }
 
+/** No app on a test machine decides whether these pass. */
+const noGuard = (): void => {};
+
 describe('import undo', () => {
   it('with no provider, does nothing', () => {
     const { store, ledger } = setup();
-    expect(runImportUndo({ store, ledger, dryRun: false })).toEqual({
+    expect(runImportUndo({ store, ledger, dryRun: false, guard: noGuard })).toEqual({
       lines: [],
       undone: 0,
       failed: 0,
@@ -58,7 +61,7 @@ describe('import undo', () => {
     const { store, ledger, names } = setup();
     cleanups.push(registerImportUndoProvider(fileProvider(names)));
 
-    const result = runImportUndo({ store, ledger, dryRun: false });
+    const result = runImportUndo({ store, ledger, dryRun: false, guard: noGuard });
     expect(result).toEqual({
       lines: ['removed imported-a.txt', 'removed imported-b.txt'],
       undone: 2,
@@ -122,7 +125,7 @@ describe('import undo', () => {
     );
     cleanups.push(registerImportUndoProvider(fileProvider(names)));
 
-    const result = runImportUndo({ store, ledger, dryRun: false });
+    const result = runImportUndo({ store, ledger, dryRun: false, guard: noGuard });
     expect(result.undone).toBe(3);
     expect(result.failed).toBe(3);
     expect(result.lines).toEqual([
@@ -133,5 +136,33 @@ describe('import undo', () => {
       'removed imported-a.txt',
       'removed imported-b.txt',
     ]);
+  });
+
+  it('asks the guard once, before anything is undone, and a refusal leaves everything', () => {
+    const { store, ledger, names } = setup();
+    cleanups.push(registerImportUndoProvider(fileProvider(names)));
+    let asked = 0;
+    const refuse = (): void => {
+      asked += 1;
+      throw new Error('the app is running');
+    };
+
+    expect(() => runImportUndo({ store, ledger, dryRun: false, guard: refuse })).toThrow(
+      /the app is running/,
+    );
+    expect(asked).toBe(1);
+    for (const name of names) expect(existsSync(path.join(store.root, name))).toBe(true);
+  });
+
+  it('does not ask the guard on a dry run, nor when nothing is selected', () => {
+    const { store, ledger, names } = setup();
+    let asked = 0;
+    const count = (): void => {
+      asked += 1;
+    };
+    runImportUndo({ store, ledger, dryRun: false, guard: count });
+    cleanups.push(registerImportUndoProvider(fileProvider(names)));
+    runImportUndo({ store, ledger, dryRun: true, guard: count });
+    expect(asked).toBe(0);
   });
 });

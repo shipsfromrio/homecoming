@@ -113,7 +113,11 @@ import {
   statsDimensionNames,
   type StatsReport,
 } from '../engine/stats.js';
-import { runImportUndo } from '../ops/importUndo.js';
+import {
+  importUndoProvidersRegistered,
+  refuseImportUndoWhileAppRuns,
+  runImportUndo,
+} from '../ops/importUndo.js';
 import { extraUnstartedSessions, findUnstarted } from '../engine/unstarted.js';
 import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
@@ -2119,14 +2123,38 @@ program
     }
 
     const dryRun = opts.dryRun || !opts.yes;
+    // Anything else a plugin brought in and knows how to take back, after the
+    // copies and under the same --yes. The core registers no provider, so
+    // without a plugin this is empty and `return` is exactly the copies. The
+    // filters name fostered copies and a provider cannot honour them, so a
+    // filtered run leaves what plugins imported alone rather than sweeping
+    // every one of them under a request that asked for less.
+    const filtered = Boolean(
+      opts.title !== undefined ||
+      (opts.session?.length ?? 0) > 0 ||
+      opts.to !== undefined ||
+      opts.toOrg !== undefined ||
+      opts.duplicates ||
+      opts.branches,
+    );
+    const asksImports = !filtered && importUndoProvidersRegistered();
+    // Refused before the first copy goes, so a running app never ends with the
+    // copies returned and the imports left half done.
+    if (asksImports && !dryRun) refuseImportUndoWhileAppRuns(store);
     // Measured before the copies go: for entries written before the ledger kept
     // the conversation id, the copy itself is where that id is read from.
     const continued = active.length > 0 ? continuedSince(store, active) : [];
     const outcomes = active.length > 0 ? returnFosterings(active, { store, ledger, dryRun }) : [];
-    // Anything else a plugin brought in and knows how to take back, after the
-    // copies and under the same --yes. The core registers no provider, so
-    // without a plugin this is empty and `return` is exactly the copies.
-    const imports = runImportUndo({ store, ledger, options: opts, dryRun });
+    const imports = asksImports
+      ? runImportUndo({ store, ledger, options: opts, dryRun })
+      : { lines: [], undone: 0, failed: 0 };
+    if (filtered && importUndoProvidersRegistered()) {
+      console.log(
+        pc.dim(
+          'What plugins imported is left alone: a filtered return takes back fostered copies only.',
+        ),
+      );
+    }
 
     if (outcomes.length === 0 && imports.lines.length === 0) {
       console.log('Nothing is fostered.');

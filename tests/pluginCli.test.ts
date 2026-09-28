@@ -9,12 +9,14 @@ import type * as Safety from '../src/engine/safety.js';
 import { makeStore, NEW_ACCOUNT } from './helpers/store.js';
 
 // `doctor` asks whether Claude Desktop is running, and the real probe answers
-// for whatever runs on the test machine.
+// for whatever runs on the test machine. A case that needs the app up says so
+// through `app.running`.
+const app = vi.hoisted(() => ({ running: false }));
 vi.mock('../src/engine/safety.js', async (importOriginal) => {
   const actual = await importOriginal<typeof Safety>();
   return {
     ...actual,
-    inspectApp: () => ({ running: false, evidence: [] }),
+    inspectApp: () => ({ running: app.running, evidence: app.running ? ['test'] : [] }),
     assertRemovable: () => {},
   };
 });
@@ -441,5 +443,43 @@ describe('return and an import undo provider', () => {
     const real = await run([importing], [...global, 'return', '--yes']);
     expect(real.out.join('\n')).toMatch(/1 returned, 0 failed/);
     expect(undone.at(-1)).toEqual({ id: 'import-1', dryRun: false });
+  });
+
+  it.each([['--title', 'x'], ['--duplicates'], ['--branches']])(
+    'leaves the imports alone on a return filtered by %s',
+    async (...filter) => {
+      const { global } = signedIn();
+      undone.length = 0;
+      const result = await run([importing], [...global, 'return', ...filter, '--yes']);
+      expect(undone).toEqual([]);
+      expect(result.out.join('\n')).not.toContain('import-1');
+      expect(result.out.join('\n')).toMatch(/What plugins imported is left alone/);
+    },
+  );
+
+  it.each([
+    ['--session', 'abc'],
+    ['--to', NEW_ACCOUNT.accountUuid],
+    ['--to-org', 'some-org'],
+  ])('undoes no import on a return filtered by %s that matches no copy', async (...filter) => {
+    const { global } = signedIn();
+    undone.length = 0;
+    await run([importing], [...global, 'return', ...filter, '--yes']);
+    expect(undone).toEqual([]);
+  });
+
+  it('refuses a real run while Claude Desktop is running, and undoes nothing', async () => {
+    const { global } = signedIn();
+    undone.length = 0;
+    app.running = true;
+    let result: Run;
+    try {
+      result = await run([importing], [...global, 'return', '--yes']);
+    } finally {
+      app.running = false;
+    }
+    expect(result.exitCode).toBe(1);
+    expect(result.err.join('\n')).toMatch(/Claude Desktop is running/);
+    expect(undone).toEqual([]);
   });
 });

@@ -101,7 +101,8 @@ export interface PluginContext {
  *   because a copy's stop belongs to the account the conversation ran in.
  * - `unstartedSources`: further places `unstarted` looks for lost requests. The
  *   core looks only in the account signed in.
- * - `importUndoProviders`: other things `return` can take back.
+ * - `importUndoProviders`: other things `return` can take back, on an unfiltered
+ *   run and never while Claude Desktop runs.
  * - `appPrefAllowlists`: guarded preference names this plugin may write. The
  *   core refuses organization policy, compliance and approval preferences.
  * - `credentialProbes`: whether a store's config carries a sign-in token.
