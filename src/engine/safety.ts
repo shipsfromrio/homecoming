@@ -9,6 +9,7 @@ import {
   readProcesses,
 } from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
+import { programName } from '../programName.js';
 
 /**
  * When a running Claude Desktop matters, and when it does not.
@@ -207,7 +208,7 @@ export function assertCardsWritable(
     `${where} and has ${count} of these ${count === 1 ? 'card' : 'cards'} loaded.
 ` +
       'A card it holds is one it will write back from memory, pointer and all, so the change ' +
-      'would not survive. Close the app first — homecoming can do that for you.',
+      `would not survive. Close the app first — ${programName()} can do that for you.`,
   );
 }
 
@@ -255,6 +256,6 @@ export function assertRemovable(
   throw new AppRunningError(
     `${where} and has ${count} of these ${count === 1 ? 'copy' : 'copies'} loaded.\n` +
       'Removing one it holds in memory only makes it write the file back. Close the app first — ' +
-      'homecoming can do that for you.',
+      `${programName()} can do that for you.`,
   );
 }

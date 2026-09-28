@@ -14,6 +14,7 @@ import {
   type PrefSpec,
 } from '../store/appPrefs.js';
 import type { StoreLayout } from '../domain/types.js';
+import { programName } from '../programName.js';
 
 /**
  * `homecoming app pref` — the app's own settings, read and written where the app
@@ -144,7 +145,7 @@ export function registerAppPref(
       // survive, and the user would have no reason to suspect it.
       if (running && hostedByDesktop(process.env)) {
         throw new Error(
-          'homecoming is running inside Claude Desktop, so it cannot close the app to make this\n' +
+          `${programName()} is running inside Claude Desktop, so it cannot close the app to make this\n` +
             'change stick. Run the same command from a terminal outside the app.',
         );
       }
@@ -286,7 +287,7 @@ export function resolve(store: StoreLayout, change: Change): Planned {
   const spec = specOf(change.name);
   if (!spec) {
     throw new Error(
-      `"${change.name}" is not a preference this build knows about. Run "homecoming app pref --all" to see the list.`,
+      `"${change.name}" is not a preference this build knows about. Run "${programName()} app pref --all" to see the list.`,
     );
   }
 
@@ -340,7 +341,7 @@ function listPrefs(store: StoreLayout, all: boolean, json: boolean): void {
   }
   if (rows.length === 0) {
     console.log('No preference has been set; the app is running on its defaults.');
-    console.log(pc.dim('homecoming app pref --all lists every one this build knows.'));
+    console.log(pc.dim(`${programName()} app pref --all lists every one this build knows.`));
     return;
   }
   const width = Math.max(...rows.map((r) => r.name.length));
@@ -364,7 +365,7 @@ function readOne(store: StoreLayout, name: string, json: boolean): void {
   const row: PrefReading | undefined = readAppPrefs(store, true).find((p) => p.name === name);
   if (!row) {
     throw new Error(
-      `"${name}" is not a preference this build knows about. Run "homecoming app pref --all" to see the list.`,
+      `"${name}" is not a preference this build knows about. Run "${programName()} app pref --all" to see the list.`,
     );
   }
   if (json) {

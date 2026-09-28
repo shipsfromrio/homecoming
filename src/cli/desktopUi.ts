@@ -12,6 +12,7 @@ import { inspectApp } from '../engine/safety.js';
 import { isCancel, type Ui } from '../tui/ui.js';
 import { aborted, selectOrBack } from './prompts.js';
 import { formatAge } from './render.js';
+import { programName } from '../programName.js';
 
 export async function desktopFlow(ui: Ui, store: StoreLayout, target: AccountRef): Promise<void> {
   for (;;) {
@@ -30,7 +31,11 @@ export async function desktopFlow(ui: Ui, store: StoreLayout, target: AccountRef
         label: 'Why do changes need a restart?',
         hint: 'and the one way around it',
       },
-      { value: 'switch', label: 'Switching accounts', hint: 'what homecoming can and cannot do' },
+      {
+        value: 'switch',
+        label: 'Switching accounts',
+        hint: `what ${programName()} can and cannot do`,
+      },
     ]);
     if (aborted(choice)) return;
 
@@ -77,9 +82,11 @@ async function confirmShutdown(
 ): Promise<boolean> {
   if (state.selfHosted) {
     ui.log.error(
-      `homecoming is running inside Claude Desktop, so it cannot ${verb} it — that would kill this session.`,
+      `${programName()} is running inside Claude Desktop, so it cannot ${verb} it — that would kill this session.`,
     );
-    ui.log.message(pc.dim('Run homecoming from a terminal outside the app, or use the app menu.'));
+    ui.log.message(
+      pc.dim(`Run ${programName()} from a terminal outside the app, or use the app menu.`),
+    );
     return false;
   }
 
@@ -143,7 +150,7 @@ async function consentToTerminate(ui: Ui): Promise<boolean> {
   ui.note(
     [
       'Claude Desktop keeps running in the tray, so asking its window to close',
-      'would only hide it. homecoming can end the process instead.',
+      `would only hide it. ${programName()} can end the process instead.`,
       '',
       'Session files are written through a temporary and renamed, so ending it',
       'cannot corrupt one. What it does skip is the app’s own shutdown: a title or',
@@ -262,14 +269,14 @@ function explainRefresh(ui: Ui, store: StoreLayout, target: AccountRef): void {
 function explainAccountSwitch(ui: Ui): void {
   ui.note(
     [
-      'homecoming cannot switch accounts, and will not try.',
+      `${programName()} cannot switch accounts, and will not try.`,
       '',
       'Which account the app uses comes from the session you are signed into, not',
       'from anything on disk — the account id in its config is only a cached copy of',
       'the answer. Changing it changes nothing. Doing it properly would mean',
-      'handling credentials, which homecoming never touches.',
+      `handling credentials, which ${programName()} never touches.`,
       '',
-      'To switch: sign out and back in from the app. Copies homecoming wrote into that',
+      `To switch: sign out and back in from the app. Copies ${programName()} wrote into that`,
       'account are waiting when you arrive — pick it as the destination under "Send',
       'them somewhere else" to stage them before you go.',
     ].join('\n'),

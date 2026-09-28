@@ -2,6 +2,7 @@ import { uniquePrefix } from '../domain/prefix.js';
 import { listAgentAccountDirs, pickActiveOrganization } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { readConfig } from '../store/config.js';
+import { programName } from '../programName.js';
 
 /**
  * Resolves an account identifier that may be an abbreviated prefix, the way the
@@ -84,8 +85,8 @@ export function resolveLabelArgs(
   if (first === undefined) {
     throw new Error(
       'Nothing to record. Give the name:\n' +
-        '  homecoming label "work"                     names the account you are signed into\n' +
-        '  homecoming label <accountUuid> "work"       names another account',
+        `  ${programName()} label "work"                     names the account you are signed into\n` +
+        `  ${programName()} label <accountUuid> "work"       names another account`,
     );
   }
 
@@ -97,16 +98,16 @@ export function resolveLabelArgs(
   if (looksLikeId) {
     throw new Error(
       `"${first}" is an account id, not a name. Say what to call it:\n` +
-        `  homecoming label ${first} "work"\n` +
+        `  ${programName()} label ${first} "work"\n` +
         'Or, to name the account you are signed into:\n' +
-        '  homecoming label "work"',
+        `  ${programName()} label "work"`,
     );
   }
 
   if (!currentAccountUuid) {
     throw new Error(
       `No account is recorded as signed in, so there is nothing for "${first}" to name.\n` +
-        'Open Claude Desktop once, or name the account outright: homecoming label <accountUuid> "…".',
+        `Open Claude Desktop once, or name the account outright: ${programName()} label <accountUuid> "…".`,
     );
   }
 

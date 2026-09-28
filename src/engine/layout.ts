@@ -54,6 +54,7 @@ import { planMarksBack, planArchiveMarksBack } from './marksBack.js';
 import { retitleCards, type RetitleRequest } from './retitle.js';
 import { AppRunningError, inspectApp } from './safety.js';
 import { readProcesses, type ProcessLister } from './desktop.js';
+import { programName } from '../programName.js';
 
 /**
  * Bring the sidebar's groups and its routines (scheduled tasks) from every
@@ -1343,7 +1344,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
         if (!record) {
           throw new Error(
             'Local Storage has never recorded the sidebar filters — open the Code sidebar in ' +
-              'Claude Desktop once, so there is a record for homecoming to change.',
+              `Claude Desktop once, so there is a record for ${programName()} to change.`,
           );
         }
         backups.push(backupLocalStorage(store, { now: options.now, env: options.env }));

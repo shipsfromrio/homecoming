@@ -57,6 +57,7 @@ import {
 } from './render.js';
 import { describeRef, labelsOf, short } from './names.js';
 import { offerRestart } from './desktopUi.js';
+import { programName } from '../programName.js';
 
 /**
  * Give an account a name.
@@ -82,8 +83,8 @@ export async function labelFlow(
   // signed in now, so the others still get introduced here.
   ui.log.info(
     pc.dim(
-      'Claude Desktop shows the account email under your avatar. homecoming does not read the\n' +
-        'token cache. For the account signed in now, `homecoming label --from-cache` names it from\n' +
+      `Claude Desktop shows the account email under your avatar. ${programName()} does not read the\n` +
+        `token cache. For the account signed in now, \`${programName()} label --from-cache\` names it from\n` +
         "the app's cached profile; the others get introduced here.",
     ),
   );

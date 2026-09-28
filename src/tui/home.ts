@@ -11,6 +11,7 @@ import {
   truncateVisible,
   visibleWidth,
 } from './widgets.js';
+import { programName } from '../programName.js';
 
 export function renderHome(
   dashboard: Dashboard,
@@ -128,8 +129,8 @@ export function renderHeader(
   // terminal honours it, plain bold where colour is off — never dark-on-dark.
   const badge =
     level === 'none'
-      ? bold(' homecoming ')
-      : paintFg(level, theme.accent, `${REVERSE}${bold(' homecoming ')}`);
+      ? bold(` ${programName()} `)
+      : paintFg(level, theme.accent, `${REVERSE}${bold(` ${programName()} `)}`);
   const left = ` ${badge} ${dim(dashboard.version)}`;
   // Everything here is painted an explicit foreground: the line sits on the
   // theme's forced background, so the terminal's own default fg is not safe.

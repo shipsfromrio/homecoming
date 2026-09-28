@@ -7,6 +7,7 @@ import { readSessionFile } from '../store/sessionFile.js';
 import { indexTranscripts, transcriptRoots } from '../store/transcripts.js';
 import { lineageAt, type Lineage } from './lineage.js';
 import { lockfileHeld } from './lockfile.js';
+import { programName } from '../programName.js';
 
 export type { LiveWriter };
 
@@ -249,10 +250,12 @@ export function liveBranchNote(writers: LiveWriter[]): string {
   // process, and the directory it was started in, which is what makes a window
   // recognisable among a dozen.
   for (const writer of writers) {
-    const self = writer.isSelf ? ' — this one, running homecoming' : '';
+    const self = writer.isSelf ? ` — this one, running ${programName()}` : '';
     lines.push(`  pid ${writer.pid}  ${writer.cwd ?? '(unknown directory)'}${self}`);
   }
-  lines.push('`homecoming live --stop <id>` ends one, when finishing is not what you want.');
+  lines.push(
+    `\`${programName()} live --stop <id>\` ends one, when finishing is not what you want.`,
+  );
   return lines.join('\n');
 }
 

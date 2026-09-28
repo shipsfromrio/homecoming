@@ -13,6 +13,7 @@ import { configDirCandidates } from './configDirs.js';
 import { accountDir, layoutFor, listAccountDirs } from '../domain/paths.js';
 import { isSessionFileName } from '../domain/naming.js';
 import { readCliSessionId } from './sessionFile.js';
+import { programName } from '../programName.js';
 
 /**
  * The CLI's registry of running sessions.
@@ -296,7 +297,7 @@ export function endableWriter(
       reason:
         `${note ?? 'the pid belongs to another process now'}.\n` +
         'Windows reuses pids, so this registry entry is stale: ending it would kill\n' +
-        'something unrelated. Run "homecoming live --prune" to clear entries like it.',
+        `something unrelated. Run "${programName()} live --prune" to clear entries like it.`,
     };
   }
   // Separated because the two read completely differently to whoever is holding
@@ -307,7 +308,7 @@ export function endableWriter(
     return {
       ok: false,
       reason:
-        'homecoming only reads the process table on Windows, so it cannot tell whether this pid\n' +
+        `${programName()} only reads the process table on Windows, so it cannot tell whether this pid\n` +
         'is still this session. It does not kill what it cannot name; end the session from\n' +
         'its own window instead.',
     };
@@ -315,7 +316,7 @@ export function endableWriter(
   return {
     ok: false,
     reason:
-      `${note ?? 'the process behind this entry could not be identified'}, so homecoming cannot\n` +
+      `${note ?? 'the process behind this entry could not be identified'}, so ${programName()} cannot\n` +
       'tell whether the pid is still this session. It does not kill what it cannot name;\n' +
       'end the session from its own window instead.',
   };

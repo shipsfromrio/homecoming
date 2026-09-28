@@ -3,6 +3,7 @@ import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { Unregister } from '../extensions.js';
 import type { BackupOptions } from '../util/backups.js';
 import { asObject, rewriteDesktopConfig } from './desktopConfig.js';
+import { programName } from '../programName.js';
 
 /**
  * The Claude Desktop preferences homecoming knows how to read and write.
@@ -304,7 +305,7 @@ export function refuseGuarded(names: readonly string[]): void {
     `refusing to write ${guarded.join(', ')}: ${guarded.length === 1 ? 'it is' : 'they are'} ` +
       'one of the settings Claude Desktop asks you to decide on its own screen (permissions, ' +
       'consent, organization policy, compliance, an approval, trusted folders, ' +
-      'private-network access or computer control). homecoming reads these but never writes ' +
+      `private-network access or computer control). ${programName()} reads these but never writes ` +
       'them; change it in the app.',
   );
 }

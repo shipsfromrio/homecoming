@@ -79,6 +79,7 @@ import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage, firstLine } from '../util/fs.js';
 import { fosterableFrom } from './foster.js';
 import { liveConversationIds } from '../store/liveSessions.js';
+import { programName } from '../programName.js';
 
 /**
  * The whole job, in one call: everything that can be in this account's sidebar,
@@ -1417,7 +1418,7 @@ function runPinPass(
     fixes,
     ...applied,
     blocked:
-      `${applied.blocked} Kept for later: "homecoming layout --yes --restart" moves ` +
+      `${applied.blocked} Kept for later: "${programName()} layout --yes --restart" moves ` +
       `${moves.length === 1 ? 'it' : 'them'} in the gap while the app is down.`,
     deferred: true,
   };
@@ -1743,7 +1744,7 @@ export interface RestartPlan {
   command: string;
 }
 
-export const RESTART_COMMAND = 'homecoming app restart';
+export const RESTART_COMMAND = `${programName()} app restart`;
 
 export function restartPlan(
   store: StoreLayout,
@@ -1770,8 +1771,7 @@ export function restartPlan(
   return {
     possible: false,
     running: state.running,
-    reason:
-      'homecoming is running inside Claude Desktop, so restarting it would kill this session part-way through.',
+    reason: `${programName()} is running inside Claude Desktop, so restarting it would kill this session part-way through.`,
     command: RESTART_COMMAND,
   };
 }
