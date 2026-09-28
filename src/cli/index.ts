@@ -1010,15 +1010,53 @@ async function runSweepCommand(
   // A phase's JSON repeated at the top under the key it names, never over a
   // key the core writes (the report's own, `prove`, `phases`, `restart`,
   // `detach`): the core's output means the same whatever a plugin names.
-  const topLevelOf = (base: Record<string, unknown>): Record<string, unknown> =>
-    Object.fromEntries(
-      phases.flatMap((phase) => {
-        const key = phase.result?.jsonKey;
-        if (!key || phase.error || phase.result?.json === undefined) return [];
-        if (key in base || ['phases', 'restart', 'detach'].includes(key)) return [];
-        return [[key, phase.result.json]];
-      }),
-    );
+  // Every key the core can write, whether or not this run wrote it: a key that
+  // is only sometimes there (`prove`, `titleSync`, `dates`, `confirmation`)
+  // still never carries a phase's JSON. The first phase to name a key keeps
+  // it; a later one is reported on stderr and stays under `phases` only.
+  const coreSweepKeys = new Set([
+    'store',
+    'target',
+    'dryRun',
+    'fostered',
+    'branches',
+    'restored',
+    'files',
+    'worktreeClaims',
+    'titleSync',
+    'archiveSync',
+    'dates',
+    'archived',
+    'liveWriters',
+    'neverComes',
+    'layout',
+    'rounds',
+    'unreadableCards',
+    'confirmation',
+    'prove',
+    'phases',
+    'restart',
+    'detach',
+  ]);
+  const topLevelOf = (base: Record<string, unknown>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    const takenBy = new Map<string, string>();
+    for (const phase of phases) {
+      const key = phase.result?.jsonKey;
+      if (!key || phase.error || phase.result?.json === undefined) continue;
+      if (key in base || coreSweepKeys.has(key)) continue;
+      const first = takenBy.get(key);
+      if (first !== undefined) {
+        console.error(
+          `sweep: phase "${phase.name}" names the top-level key "${key}", already taken by phase "${first}"; its JSON is only under phases.${phase.name}.`,
+        );
+        continue;
+      }
+      takenBy.set(key, phase.name);
+      out[key] = phase.result.json;
+    }
+    return out;
+  };
 
   // Named here, not in `sweepRestart` itself: a layout is planned but never
   // applied by the sweep, so the command handed over on a restart has to be

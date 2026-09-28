@@ -79,8 +79,10 @@ export interface PostSweepResult {
   /**
    * Also writes `json` at the top of `sweep --json`, under this key, for a
    * build whose scripts already read it there. A key the core itself writes
-   * (`fostered`, `prove`, `restart`, `phases`, ...) is never taken: the phase's
-   * JSON is then only under `phases.<name>`.
+   * (`fostered`, `prove`, `restart`, `phases`, ...) is never taken, even on a run
+   * where the core leaves it out, and the first phase to name a key keeps it: a
+   * later one is reported on stderr. Either way the phase's JSON is still under
+   * `phases.<name>`.
    */
   jsonKey?: string;
   /** Failed writes; any above zero makes a `--yes` run exit 1. */

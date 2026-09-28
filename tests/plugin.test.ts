@@ -329,14 +329,31 @@ describe('a sweep phase that names a top-level JSON key', () => {
       sweepPhases: [
         { name: 'keyed', run: () => ({ json: { planned: 2 }, jsonKey: 'keyed' }) },
         { name: 'greedy', run: () => ({ json: { mine: true }, jsonKey: 'restart' }) },
+        // `prove` and `titleSync` are core keys this run leaves out; still refused.
+        { name: 'prover', run: () => ({ json: { fake: true }, jsonKey: 'prove' }) },
+        { name: 'titler', run: () => ({ json: { fake: true }, jsonKey: 'titleSync' }) },
+        { name: 'second', run: () => ({ json: { late: true }, jsonKey: 'keyed' }) },
       ],
     });
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const global = ['--no-cache', '--store', swept.root, '--ledger', ledgerPath];
     dispose = await runCli({ plugins: [keyed], argv: [...global, 'sweep', '--json'] });
     const json = JSON.parse(String(log.mock.calls.at(-1)?.[0])) as Record<string, unknown>;
     expect(json.keyed).toEqual({ planned: 2 });
-    expect(json.phases).toEqual({ keyed: { planned: 2 }, greedy: { mine: true } });
+    expect(json.phases).toEqual({
+      keyed: { planned: 2 },
+      greedy: { mine: true },
+      prover: { fake: true },
+      titler: { fake: true },
+      second: { late: true },
+    });
+    expect(json.prove).toBeUndefined();
+    expect(json.titleSync).toBeUndefined();
+    // The first phase naming `keyed` keeps it; the second is told why it did not.
+    expect(errors.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+      'phase "second" names the top-level key "keyed", already taken by phase "keyed"',
+    );
     // The core's own `restart` is untouched by a phase that asked for its name.
     expect(json.restart).not.toEqual({ mine: true });
     const keys = Object.keys(json);
