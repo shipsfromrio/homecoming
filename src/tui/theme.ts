@@ -1,3 +1,5 @@
+import type { Unregister } from '../extensions.js';
+
 /**
  * Named colour slots: one palette, quantized to whatever
  * the terminal can actually paint.
@@ -144,4 +146,52 @@ function ansiBg(r: number, g: number, b: number): number {
 function ansiIndex(r: number, g: number, b: number): number {
   const bits = (n: number) => (n > 96 ? 1 : 0);
   return bits(r) + bits(g) * 2 + bits(b) * 4;
+}
+
+// ---------------------------------------------------------------------------
+// Extra colour slots
+
+/**
+ * A named colour a plugin adds to both themes, for widgets of its own. Colours
+ * are `#rrggbb`, like the core slots, so they quantize the same way.
+ */
+export interface ThemeSlot {
+  name: string;
+  night: string;
+  day: string;
+}
+
+const HEX = /^#[0-9a-f]{6}$/i;
+const themeSlots: ThemeSlot[] = [];
+
+/** The core slots, which a registered slot cannot redefine. */
+const CORE_SLOTS: ReadonlySet<string> = new Set(
+  Object.keys(FOSTER_NIGHT).filter((key) => HEX.test(String(FOSTER_NIGHT[key as keyof Theme]))),
+);
+
+/**
+ * Adds a colour slot. A name the core already uses, or one an earlier slot
+ * took, is ignored rather than allowed to repaint it; a colour that is not
+ * `#rrggbb` is refused.
+ */
+export function registerThemeSlot(slot: ThemeSlot): Unregister {
+  if (!HEX.test(slot.night) || !HEX.test(slot.day)) {
+    throw new Error(`theme slot "${slot.name}" needs #rrggbb colours`);
+  }
+  themeSlots.push(slot);
+  return () => {
+    const at = themeSlots.indexOf(slot);
+    if (at >= 0) themeSlots.splice(at, 1);
+  };
+}
+
+/**
+ * The colour a slot has in a theme: a core slot by its name, then the first
+ * registered slot of that name. Undefined for a name nobody defined.
+ */
+export function themeColor(theme: Theme, slot: string): string | undefined {
+  if (CORE_SLOTS.has(slot)) return theme[slot as keyof Theme];
+  const found = themeSlots.find((entry) => entry.name === slot);
+  if (!found) return undefined;
+  return theme.name === 'day' ? found.day : found.night;
 }

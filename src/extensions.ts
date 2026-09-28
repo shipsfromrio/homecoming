@@ -1,7 +1,7 @@
 import type { AccountRef, StoreLayout } from './domain/types.js';
 import type { Ledger } from './ledger/log.js';
 import type { SweepReport } from './ops/sweep.js';
-import type { Ui } from './tui/ui.js';
+import type { DashboardAccount, Ui } from './tui/ui.js';
 
 /**
  * The extension points the core consults at run time, beyond the ones that live
@@ -87,6 +87,21 @@ export interface PostSweepResult {
  */
 export interface PostSweepPhase {
   name: string;
+  /**
+   * Options the interactive menu's sweep passes to every phase, where the
+   * `sweep` command would pass the ones it parsed. The menu has no command
+   * line, so without this a phase that reads an option always saw `{}` there.
+   * The menu passes the union of every phase's declaration, in registration
+   * order (a later phase wins a key both declare). A function is called once
+   * per sweep; one that throws contributes nothing.
+   */
+  interactiveOptions?:
+    | Readonly<Record<string, unknown>>
+    | ((context: {
+        store: StoreLayout;
+        ledger: Ledger;
+        target: AccountRef;
+      }) => Readonly<Record<string, unknown>>);
   run(
     context: PostSweepContext,
   ): PostSweepResult | undefined | Promise<PostSweepResult | undefined>;
@@ -96,6 +111,33 @@ const sweepPhases = registry<PostSweepPhase>();
 
 export function registerSweepPhase(phase: PostSweepPhase): Unregister {
   return sweepPhases.add(phase);
+}
+
+/**
+ * What the interactive sweep passes as `options`: the union of every phase's
+ * `interactiveOptions`. Empty when no phase declares any, which is what the
+ * menu passed before phases could declare them.
+ */
+export function sweepPhaseInteractiveOptions(context: {
+  store: StoreLayout;
+  ledger: Ledger;
+  target: AccountRef;
+}): Record<string, unknown> {
+  const options: Record<string, unknown> = {};
+  for (const phase of sweepPhases.items) {
+    const declared = phase.interactiveOptions;
+    if (declared === undefined) continue;
+    let value: Readonly<Record<string, unknown>> | undefined;
+    try {
+      value = typeof declared === 'function' ? declared(context) : declared;
+    } catch {
+      // The phase still runs and can report the missing option itself; one bad
+      // declaration must not cost the other phases theirs.
+      continue;
+    }
+    if (value && typeof value === 'object') Object.assign(options, value);
+  }
+  return options;
 }
 
 /** One phase's outcome, as `runSweepPhases` returns it. */
@@ -142,12 +184,20 @@ export async function runSweepPhases(context: PostSweepContext): Promise<SweepPh
 export interface DoctorFinding {
   level: 'ok' | 'info' | 'warn' | 'error';
   message: string;
+  /** Structured detail, carried as is into `doctor --json` under the check. */
+  data?: Readonly<Record<string, unknown>>;
 }
 
 /** One more thing `doctor` looks at. Read-only by contract: a check never writes. */
 export interface DoctorCheck {
   name: string;
   run(context: { store: StoreLayout; ledger: Ledger }): DoctorFinding[];
+  /**
+   * Keys this check adds at the top level of `doctor --json`, beside the core
+   * ones. A key the core already prints, or one an earlier check claimed, is
+   * refused rather than allowed to overwrite it.
+   */
+  json?(context: { store: StoreLayout; ledger: Ledger }): Readonly<Record<string, unknown>>;
 }
 
 const doctorChecks = registry<DoctorCheck>();
@@ -175,6 +225,59 @@ export function runDoctorChecks(context: {
   });
 }
 
+/**
+ * The top-level keys the registered checks add to `doctor --json`, merged in
+ * registration order. A key in `reservedKeys` (the core's own) or one an
+ * earlier check already claimed is refused. A `json` that throws adds nothing.
+ *
+ * When `results` (what `runDoctorChecks` returned) is passed, a refusal becomes
+ * a `warn` finding and a throw an `error` finding under that check, so neither
+ * is silent; without it they are only left out.
+ */
+export function doctorTopLevelJson(
+  context: { store: StoreLayout; ledger: Ledger },
+  reservedKeys: readonly string[],
+  results?: { name: string; findings: DoctorFinding[] }[],
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  const taken = new Set(reservedKeys);
+  const report = (name: string, finding: DoctorFinding): void => {
+    if (!results) return;
+    let entry = results.find((result) => result.name === name);
+    if (!entry) {
+      entry = { name, findings: [] };
+      results.push(entry);
+    }
+    entry.findings.push(finding);
+  };
+  for (const check of doctorChecks.items) {
+    if (!check.json) continue;
+    let value: Readonly<Record<string, unknown>>;
+    try {
+      value = check.json(context);
+    } catch (error) {
+      report(check.name, {
+        level: 'error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    if (!value || typeof value !== 'object') continue;
+    for (const [key, entry] of Object.entries(value)) {
+      if (taken.has(key)) {
+        report(check.name, {
+          level: 'warn',
+          message: `JSON key "${key}" is already taken; left out`,
+        });
+        continue;
+      }
+      taken.add(key);
+      merged[key] = entry;
+    }
+  }
+  return merged;
+}
+
 // ---------------------------------------------------------------------------
 // Menu items
 
@@ -183,6 +286,23 @@ export interface MenuContext {
   store: StoreLayout;
   ledger: Ledger;
   target: AccountRef;
+  /**
+   * Asks the menu to act on another store (and, optionally, another target)
+   * from the next screen on. The same as returning `{ store, target }` from
+   * `run`; a returned outcome wins when an item does both.
+   */
+  switchStore?(store: StoreLayout, target?: AccountRef): void;
+}
+
+/**
+ * What a menu item may hand back. With `store`, the menu acts on that store from
+ * the next screen on; with `target`, on that account. A `store` without a
+ * `target` means the account signed in to that store. Returning nothing keeps
+ * both as they were.
+ */
+export interface MenuOutcome {
+  store?: StoreLayout;
+  target?: AccountRef;
 }
 
 /**
@@ -197,7 +317,12 @@ export interface MenuItem {
   hint?: string;
   /** Empty-prompt hotkey on the home screen; ignored when a core entry has it. */
   hotkey?: string;
-  run(context: MenuContext, accountUuid?: string): Promise<void>;
+  /**
+   * Further words the `/` palette accepts for this item. One that is already a
+   * core alias, or any entry's value or slash, is ignored.
+   */
+  aliases?: readonly string[];
+  run(context: MenuContext, accountUuid?: string): Promise<void | MenuOutcome>;
 }
 
 const menuItems = registry<MenuItem>();
@@ -208,4 +333,31 @@ export function registerMenuItem(item: MenuItem): Unregister {
 
 export function listMenuItems(): readonly MenuItem[] {
   return menuItems.items;
+}
+
+// ---------------------------------------------------------------------------
+// Account menu items
+
+/**
+ * An entry in the small menu Enter opens on an account row of the dashboard.
+ * It is offered only when `when` (if given) says so for that row, and runs with
+ * the account the cursor was on. A `value` that is one of the core's verbs, or
+ * that a menu item already answers to, is ignored.
+ */
+export interface AccountMenuItem {
+  value: string;
+  label: string | ((account: DashboardAccount) => string);
+  hint?: string;
+  when?(account: DashboardAccount): boolean;
+  run(context: MenuContext, accountUuid: string): Promise<void | MenuOutcome>;
+}
+
+const accountMenuItems = registry<AccountMenuItem>();
+
+export function registerAccountMenuItem(item: AccountMenuItem): Unregister {
+  return accountMenuItems.add(item);
+}
+
+export function listAccountMenuItems(): readonly AccountMenuItem[] {
+  return accountMenuItems.items;
 }
