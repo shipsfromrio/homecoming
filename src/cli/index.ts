@@ -86,7 +86,7 @@ import {
 } from '../util/processes.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findPurgeable } from '../store/purge.js';
-import { identityLabel, readIdentityFromCache, resolveIdentity } from '../store/identity.js';
+import { identityLabel, identityOf } from '../store/identity.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanStore, summarise } from '../store/scanner.js';
 import {
@@ -105,7 +105,15 @@ import {
 } from '../engine/rescue.js';
 import { defaultReviveDeps, findStopped } from '../engine/revive.js';
 import { diskReport, type DiskReport } from '../engine/diskUsage.js';
-import { computeStats, defaultStatsDeps, type StatsReport } from '../engine/stats.js';
+import {
+  computeStats,
+  defaultStatsDeps,
+  statsBucketName,
+  statsDimensionLabel,
+  statsDimensionNames,
+  type StatsReport,
+} from '../engine/stats.js';
+import { runImportUndo } from '../ops/importUndo.js';
 import { extraUnstartedSessions, findUnstarted } from '../engine/unstarted.js';
 import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
@@ -230,7 +238,14 @@ import {
 } from '../engine/view.js';
 import { applyLabel } from '../ops/label.js';
 import { labelsOf, manualLabelsOf, useStoreForNames } from './names.js';
-import { runDoctorChecks, runSweepPhases, type DoctorFinding } from '../extensions.js';
+import {
+  doctorTopLevelJson,
+  runDoctorChecks,
+  runSweepPhases,
+  type DoctorFinding,
+} from '../extensions.js';
+import { applyCommandExtenders } from './commandExtenders.js';
+import { useLedgerForConfigDirs } from '../store/configDirs.js';
 import { usePlugin, type HomecomingPlugin, type PluginContext } from '../plugin.js';
 import { commandPath } from './commandPath.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
@@ -304,6 +319,9 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   const store = resolveStoreArg(opts.store, () => ledger.read());
   useStoreForNames(store);
+  // Config directory providers read the same ledger the command acts on, so a
+  // directory a plugin keeps in its own slot follows `--ledger` too.
+  useLedgerForConfigDirs(ledger);
   return { store, ledger };
 }
 
@@ -507,7 +525,9 @@ program
     const cache = cacheStats(defaultCacheDir(process.env));
 
     if (opts.json) {
-      print({
+      const scope = { store, ledger };
+      const checks = runDoctorChecks(scope);
+      const core = {
         version: VERSION,
         store: store.root,
         candidates: roots.length,
@@ -516,7 +536,7 @@ program
         appRunning: app.running,
         // Populated by the inspectApp call above, so this costs no extra read.
         processTable: processTableProvenance(),
-        checks: runDoctorChecks({ store, ledger }),
+        checks,
         cache: {
           dir: cache.dir,
           disabled: cacheDisabled(process.env, opts.cache === false),
@@ -524,7 +544,11 @@ program
           bytes: cache.bytes,
           newestMtimeMs: cache.newestMtimeMs ?? null,
         },
-      });
+      };
+      // A check's own top-level keys go after the core's and never replace one:
+      // `error` is reserved too, for the no-store answer above. A key refused, or
+      // a `json` that throws, is reported under that check in `checks`.
+      print({ ...core, ...doctorTopLevelJson(scope, [...Object.keys(core), 'error'], checks) });
       return;
     }
 
@@ -652,7 +676,10 @@ function storeLine(
 ): string {
   const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
   const label = known.name ?? known.root;
-  return `${marker} ${label} ${pc.dim(`(${storeState(known)}) last seen as ${lastSeenAs(known, labels)}`)}`;
+  // A provider's note, when it attached one, closes the line: it explains the
+  // entry, and the state and account before it stay where scripts expect them.
+  const note = known.note ? ` — ${known.note}` : '';
+  return `${marker} ${label} ${pc.dim(`(${storeState(known)}) last seen as ${lastSeenAs(known, labels)}${note}`)}`;
 }
 
 /** Prints every installation the ledger and the extensions know, with its state. */
@@ -2091,27 +2118,35 @@ program
       );
     }
 
-    if (active.length === 0) {
+    const dryRun = opts.dryRun || !opts.yes;
+    // Measured before the copies go: for entries written before the ledger kept
+    // the conversation id, the copy itself is where that id is read from.
+    const continued = active.length > 0 ? continuedSince(store, active) : [];
+    const outcomes = active.length > 0 ? returnFosterings(active, { store, ledger, dryRun }) : [];
+    // Anything else a plugin brought in and knows how to take back, after the
+    // copies and under the same --yes. The core registers no provider, so
+    // without a plugin this is empty and `return` is exactly the copies.
+    const imports = runImportUndo({ store, ledger, options: opts, dryRun });
+
+    if (outcomes.length === 0 && imports.lines.length === 0) {
       console.log('Nothing is fostered.');
       return;
     }
 
-    const dryRun = opts.dryRun || !opts.yes;
-    // Measured before the copies go: for entries written before the ledger kept
-    // the conversation id, the copy itself is where that id is read from.
-    const continued = continuedSince(store, active);
-    const outcomes = returnFosterings(active, { store, ledger, dryRun });
     for (const outcome of outcomes) console.log(outcomeLine(outcome));
+    for (const line of imports.lines) console.log(line);
 
     const counts = summariseOutcomes(outcomes);
+    const returned = counts.returned + imports.undone;
+    const failed = counts.failed + imports.failed;
     if (dryRun) {
-      console.log(pc.bold(`\nDry run: ${counts.returned} would be returned.`));
+      console.log(pc.bold(`\nDry run: ${returned} would be returned.`));
       console.log(pc.dim('Re-run with --yes to remove.'));
       return;
     }
 
-    console.log(pc.bold(`\n${counts.returned} returned, ${counts.failed} failed.`));
-    if (counts.failed > 0) process.exitCode = 1;
+    console.log(pc.bold(`\n${returned} returned, ${failed} failed.`));
+    if (failed > 0) process.exitCode = 1;
     if (continued.length > 0)
       console.log(
         pc.dim(`
@@ -3683,8 +3718,9 @@ program
       if (!currentAccountUuid) {
         throw new Error('No account is signed in, so there is nothing to read a name for.');
       }
-      // The same read `whoami` uses, so the two never disagree.
-      const identity = resolveIdentity(readIdentityFromCache(store, currentAccountUuid), undefined);
+      // The same read `whoami` uses, so the two never disagree: the app's cache,
+      // completed by any identity reader or source a plugin registered.
+      const identity = identityOf(store, currentAccountUuid, ledger);
       const fromCache = identityLabel(identity);
       if (!fromCache) {
         throw new Error(
@@ -3723,12 +3759,21 @@ program
   .description("the signed-in account's name and email, read from the app's own cache")
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
-    const { store } = context(this);
+    const { store, ledger } = context(this);
     const accountUuid = readConfig(store).lastKnownAccountUuid;
     const json = this.opts<{ json?: boolean }>().json;
 
     if (!accountUuid) {
-      if (json) return print({ accountUuid: null, email: null, name: null });
+      if (json) {
+        return print({
+          accountUuid: null,
+          email: null,
+          name: null,
+          plan: null,
+          remembered: false,
+          seenAt: null,
+        });
+      }
       console.log('No account is signed in. Open Claude Desktop once first.');
       return;
     }
@@ -3739,19 +3784,29 @@ program
     if (!json) console.log(`account  ${accountUuid}`);
 
     // Read at rest, never over the network: the app cached its own profile in the
-    // web-origin LevelDB, which is page data rather than a credential.
-    const identity = resolveIdentity(readIdentityFromCache(store, accountUuid), undefined);
+    // web-origin LevelDB, which is page data rather than a credential. Identity
+    // readers a plugin registered complete that read, and an identity source
+    // answers for what the cache no longer holds; the core has neither, so
+    // without a plugin `plan` stays null and nothing is `remembered`.
+    const identity = identityOf(store, accountUuid, ledger);
 
     if (json) {
       return print({
         accountUuid,
         email: identity?.email ?? null,
         name: identity?.name ?? null,
+        plan: identity?.plan ?? null,
+        remembered: identity?.remembered ?? false,
+        seenAt: identity?.seenAt ?? null,
       });
     }
 
     if (identity?.name) console.log(`name     ${pc.bold(identity.name)}`);
     if (identity?.email) console.log(`email    ${identity.email}`);
+    if (identity?.plan) console.log(`plan     ${identity.plan}`);
+    if (identity?.remembered && identity.seenAt !== undefined) {
+      console.log(pc.dim(`Not in the app's cache now; last seen ${formatDate(identity.seenAt)}.`));
+    }
     if (!identity?.email && !identity?.name) {
       console.log(
         pc.dim(
@@ -4986,6 +5041,20 @@ program
     for (const line of diskReportLines(report, labelsOf(ledger))) console.log(line);
   });
 
+/**
+ * `stats --by`: its choices are the core's two dimensions plus whatever a
+ * plugin registered, so they are set again by `runCli` once the plugins are in
+ * (see `refreshStatsDimensions`), not frozen at load.
+ */
+const statsByOption = new Option('--by <dimension>', 'how to group the totals')
+  .choices(statsDimensionNames())
+  .default('model');
+
+/** Brings `stats --by`'s accepted values in line with the dimensions registered now. */
+function refreshStatsDimensions(): void {
+  statsByOption.choices(statsDimensionNames());
+}
+
 program
   .command('stats')
   .helpGroup('Reports:')
@@ -4998,15 +5067,11 @@ program
       'goes to the network.',
   )
   .option('--since <age>', 'how far back to read', '30d')
-  .addOption(
-    new Option('--by <dimension>', 'how to group the totals')
-      .choices(['model', 'week'])
-      .default('model'),
-  )
+  .addOption(statsByOption)
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
     context(this);
-    const opts = this.opts<{ since: string; by: 'model' | 'week'; json?: boolean }>();
+    const opts = this.opts<{ since: string; by: string; json?: boolean }>();
     const since = parseSince(opts.since);
     if (since === undefined) {
       throw new Error(`Could not read --since "${opts.since}". Try 30d, 12h or 4w.`);
@@ -5117,10 +5182,18 @@ function diskReportLines(report: DiskReport, labels: Map<string, string>): strin
   return lines;
 }
 
+/** Registered stats counters, appended to a report line; empty without any. */
+function counterText(counters: Record<string, number> | undefined): string {
+  if (!counters) return '';
+  return Object.entries(counters)
+    .map(([name, value]) => ` · ${name} ${value.toLocaleString()}`)
+    .join('');
+}
+
 function statsReportLines(report: StatsReport): string[] {
   const lines: string[] = [];
   const days = Math.max(1, Math.round((Date.now() - report.since) / 86_400_000));
-  lines.push(pc.bold(`Usage over the last ~${days} day(s), by ${report.by}:`));
+  lines.push(pc.bold(`Usage over the last ~${days} day(s), by ${statsDimensionLabel(report.by)}:`));
 
   if (report.buckets.length === 0) {
     lines.push(pc.dim('  nothing found in the transcripts this store can see.'));
@@ -5128,12 +5201,14 @@ function statsReportLines(report: StatsReport): string[] {
   }
 
   for (const bucket of report.buckets) {
-    const name = report.by === 'model' ? (bucket.key.model ?? 'unknown') : (bucket.key.week ?? '?');
+    const name = statsBucketName(report.by, bucket);
     const tokens =
       `in ${bucket.inputTokens.toLocaleString()} · out ${bucket.outputTokens.toLocaleString()} · ` +
       `cache-create ${bucket.cacheCreationTokens.toLocaleString()} · ` +
       `cache-read ${bucket.cacheReadTokens.toLocaleString()}`;
-    lines.push(`  ${name.padEnd(28)} ${bucket.sessions} session(s)  ${tokens}`);
+    lines.push(
+      `  ${name.padEnd(28)} ${bucket.sessions} session(s)  ${tokens}${counterText(bucket.counters)}`,
+    );
   }
 
   const t = report.totals;
@@ -5142,7 +5217,7 @@ function statsReportLines(report: StatsReport): string[] {
     pc.bold(
       `Total: ${t.sessions} session(s) · in ${t.inputTokens.toLocaleString()} · ` +
         `out ${t.outputTokens.toLocaleString()} · cache-create ${t.cacheCreationTokens.toLocaleString()} · ` +
-        `cache-read ${t.cacheReadTokens.toLocaleString()}`,
+        `cache-read ${t.cacheReadTokens.toLocaleString()}${counterText(t.counters)}`,
     ),
   );
 
@@ -5917,8 +5992,8 @@ async function restartDesktop(
 }
 
 /**
- * Runs the CLI: registers each plugin (its extensions, then its commands), then
- * parses `argv`. Errors print in red and set exit code 1 rather than throwing,
+ * Runs the CLI: registers each plugin (its extensions, then its commands), fits
+ * the registered command extenders onto the core commands, then parses `argv`. Errors print in red and set exit code 1 rather than throwing,
  * the way every command has always failed, and that includes a plugin whose
  * `usePlugin` or `register` throws: every plugin registered so far is taken
  * back out and `argv` is not run. Resolves to a function that
@@ -5955,6 +6030,20 @@ export async function runCli(
       return unregister;
     }
   }
+  // Once every plugin is in: the options and hooks command extenders (and
+  // next-step hints) add to core commands, and the dimensions `stats --by`
+  // accepts. An extender naming a command that does not exist fails the run
+  // the same way a plugin that cannot register does.
+  try {
+    undo.push(applyCommandExtenders(program, context, print));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(pc.red(message));
+    process.exitCode = 1;
+    unregister();
+    return unregister;
+  }
+  refreshStatsDimensions();
   try {
     if (options.argv) await program.parseAsync([...options.argv], { from: 'user' });
     else await program.parseAsync();
