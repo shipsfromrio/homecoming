@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
+import type { Ledger } from '../ledger/log.js';
 
 /**
  * Every directory the CLI might call home.
@@ -19,9 +20,27 @@ import path from 'node:path';
  * defaults are candidates, unchecked. Registered with
  * {@link registerConfigDirProvider}.
  */
-export type ConfigDirProvider = (env: NodeJS.ProcessEnv, home: string) => string[];
+export type ConfigDirProvider = (
+  env: NodeJS.ProcessEnv,
+  home: string,
+  context?: { ledger?: Ledger },
+) => string[];
 
 const providers: ConfigDirProvider[] = [];
+
+/**
+ * The ledger providers are handed, set once per run by whoever resolved it (the
+ * same way `useStoreForNames` hands the namer its store). Ambient on purpose:
+ * `transcriptRoots` and `sessionRegistryRoots` are called from far too many
+ * places to thread a ledger through every one, and a provider that needs none
+ * never notices. Unset, providers get `undefined`.
+ */
+let ledgerForProviders: Ledger | undefined;
+
+/** Sets (or, with `undefined`, clears) the ledger config dir providers receive. */
+export function useLedgerForConfigDirs(ledger: Ledger | undefined): void {
+  ledgerForProviders = ledger;
+}
 
 /** Adds a source of config directories. Returns a function that removes it again. */
 export function registerConfigDirProvider(provider: ConfigDirProvider): () => void {
@@ -42,7 +61,7 @@ export function configDirCandidates(
     if (dir) dirs.add(dir);
   }
   for (const provider of providers) {
-    for (const dir of provider(env, home)) if (dir) dirs.add(dir);
+    for (const dir of provider(env, home, { ledger: ledgerForProviders })) if (dir) dirs.add(dir);
   }
   return [...dirs];
 }
