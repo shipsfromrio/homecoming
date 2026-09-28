@@ -30,6 +30,7 @@ import {
   backupLocalStorage,
   currentLog,
   localStoragePresent,
+  localStorageWriteTarget,
   readLocalStorageValue,
   writeLocalStorageEntries,
   writeLocalStorageValue,
@@ -557,6 +558,119 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
 }
 
 // ---------------------------------------------------------------------------
+// Registered Local Storage writes
+// ---------------------------------------------------------------------------
+
+/** One Local Storage key a registered write replaces, with the exact text it gets. */
+export interface LocalStorageTextWrite {
+  scriptKey: string;
+  text: string;
+}
+
+/**
+ * More Local Storage keys for the layout to write in the closed-app gap, in
+ * the same batch (one sequence number, one appended record) and behind the
+ * same backup as the groups' own two keys. The core registers none, so with
+ * none registered `applyLayout` writes exactly what it always did.
+ *
+ * `writes` is asked twice: once by `planLayout`, which only counts the
+ * answer (a dry run stops there), and once more by `applyLayout` right before
+ * it writes, against the store as it is then. It must return nothing when the
+ * store already says what it would write (`readLocalStorageText` reads the
+ * current text): anything it returns counts as layout work pending, and
+ * pending work is what makes a sweep close and restart the app.
+ *
+ * What lands here is read by the app when it starts, so a write can make the
+ * app start from a state it never saved itself. That is the whole point, and
+ * also the risk: the core refuses a write to a key it writes itself, an empty
+ * key, two registrants claiming one key, and refuses the whole run (before
+ * anything anywhere is written) when `writes` throws. What the text means is
+ * the registrant's responsibility.
+ */
+export interface LayoutStorageWrite {
+  name: string;
+  writes(context: {
+    store: StoreLayout;
+    target: AccountRef;
+    nowMs: number;
+  }): readonly LocalStorageTextWrite[];
+}
+
+const layoutStorageWrites: LayoutStorageWrite[] = [];
+
+/** Adds a set of Local Storage writes to the layout. Returns a function that removes it again. */
+export function registerLayoutStorageWrite(write: LayoutStorageWrite): () => void {
+  layoutStorageWrites.push(write);
+  return () => {
+    const at = layoutStorageWrites.indexOf(write);
+    if (at >= 0) layoutStorageWrites.splice(at, 1);
+  };
+}
+
+/** What one registered write asked for, as `planLayout` saw it. */
+export interface LayoutStorageWritePlan {
+  name: string;
+  scriptKeys: string[];
+}
+
+/** Keys the core itself writes to Local Storage during `applyLayout`. */
+const CORE_LAYOUT_STORAGE_KEYS = new Set(['LSS-persisted.dframe-group-scopes', 'dframe-store']);
+
+/**
+ * Asks every registered write what it wants, checked: an empty key, a key the
+ * core writes itself, two registrants writing the same key, or a value that is
+ * not text is refused. Throws on the first problem; nothing is written here.
+ * With no Local Storage database there is nowhere to write, and nothing is
+ * asked.
+ */
+function collectLayoutStorageWrites(
+  store: StoreLayout,
+  target: AccountRef,
+  nowMs: number,
+): { name: string; writes: LocalStorageTextWrite[] }[] {
+  if (layoutStorageWrites.length === 0 || !localStoragePresent(store)) return [];
+  const claimed = new Map<string, string>();
+  const out: { name: string; writes: LocalStorageTextWrite[] }[] = [];
+  for (const registered of [...layoutStorageWrites]) {
+    let asked: readonly LocalStorageTextWrite[];
+    try {
+      asked = registered.writes({ store, target, nowMs });
+    } catch (error) {
+      throw new Error(
+        `layout storage write "${registered.name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+    const writes: LocalStorageTextWrite[] = [];
+    for (const write of asked) {
+      if (typeof write.scriptKey !== 'string' || write.scriptKey === '') {
+        throw new Error(`layout storage write "${registered.name}" named an empty key.`);
+      }
+      if (typeof write.text !== 'string') {
+        throw new Error(
+          `layout storage write "${registered.name}" gave ${write.scriptKey} a value that is not text.`,
+        );
+      }
+      if (CORE_LAYOUT_STORAGE_KEYS.has(write.scriptKey)) {
+        throw new Error(
+          `layout storage write "${registered.name}" asked for ${write.scriptKey}, which the layout writes itself.`,
+        );
+      }
+      const owner = claimed.get(write.scriptKey);
+      if (owner !== undefined) {
+        throw new Error(
+          `layout storage writes "${owner}" and "${registered.name}" both asked for ${write.scriptKey}.`,
+        );
+      }
+      claimed.set(write.scriptKey, registered.name);
+      writes.push({ scriptKey: write.scriptKey, text: write.text });
+    }
+    if (writes.length > 0) out.push({ name: registered.name, writes });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Plan / apply
 // ---------------------------------------------------------------------------
 
@@ -610,6 +724,12 @@ export interface LayoutPlan {
   pinsParity?: PinParityPlan;
   /** `homecoming pin --clear-all` is waiting: the gap empties the whole pin list (`pinClearPending`). */
   pinsClear?: boolean;
+  /**
+   * What registered Local Storage writes asked for when the plan was taken
+   * (`registerLayoutStorageWrite`). Absent with none registered, or none
+   * asking. `applyLayout` asks again before writing; this is for counting.
+   */
+  storageWrites?: LayoutStorageWritePlan[];
 }
 
 export interface PlanLayoutOptions {
@@ -677,6 +797,22 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
       target,
       mostRecentlyActiveOtherAccount(store, target, cache),
     ),
+    ...storageWritesPlan(store, target, options.now ?? Date.now()),
+  };
+}
+
+function storageWritesPlan(
+  store: StoreLayout,
+  target: AccountRef,
+  nowMs: number,
+): { storageWrites?: LayoutStorageWritePlan[] } {
+  const asked = collectLayoutStorageWrites(store, target, nowMs);
+  if (asked.length === 0) return {};
+  return {
+    storageWrites: asked.map((entry) => ({
+      name: entry.name,
+      scriptKeys: entry.writes.map((write) => write.scriptKey),
+    })),
   };
 }
 
@@ -706,6 +842,8 @@ export interface LayoutPendingCounts {
   machineViewKeysCarried?: number;
   /** Account-uuid-keyed app prefs that would be carried. Absent on a hand-built count. */
   accountPrefsCarried?: number;
+  /** Local Storage keys registered writes would replace. Absent with none asking. */
+  storageKeysWritten?: number;
 }
 
 /**
@@ -742,6 +880,14 @@ export function pendingLayoutCounts(plan: LayoutPlan): LayoutPendingCounts {
       (plan.machineViewPrefs?.groupBy !== undefined ? 1 : 0) +
       (plan.machineViewPrefs?.sortBy !== undefined ? 1 : 0),
     accountPrefsCarried: Object.keys(plan.accountPrefsCarry?.changes ?? {}).length,
+    ...(plan.storageWrites && plan.storageWrites.length > 0
+      ? {
+          storageKeysWritten: plan.storageWrites.reduce(
+            (sum, entry) => sum + entry.scriptKeys.length,
+            0,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -760,7 +906,8 @@ export function totalLayoutPending(counts: LayoutPendingCounts): number {
     (counts.pinsToUnpin ?? 0) +
     (counts.pinsClear ?? 0) +
     (counts.machineViewKeysCarried ?? 0) +
-    (counts.accountPrefsCarried ?? 0)
+    (counts.accountPrefsCarried ?? 0) +
+    (counts.storageKeysWritten ?? 0)
   );
 }
 
@@ -842,6 +989,11 @@ export interface ApplyLayoutResult {
   marksBack?: number;
   /** Archive-only writes written again after the running app undid them — see `planArchiveMarksBack`. */
   archiveMarksBack?: number;
+  /**
+   * The registered Local Storage writes that landed this run, by name, and
+   * how many keys each replaced. Absent when none did.
+   */
+  storageWrites?: { name: string; keys: number }[];
   /** Every backup this run wrote, before either file was touched. */
   backups: string[];
   /**
@@ -1064,6 +1216,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
   }
 
   let groups: ReconciledGroups | undefined;
+  let storageWritesLanded = false;
   if (plannedGroups.length > 0) {
     const scopes = readGroupScopes(store);
     const current: GroupScope = scopes[key] ?? { groups: [], assignments: {} };
@@ -1228,6 +1381,21 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     toBringRoutines = plan.routines.bring.filter((item) => !idsNow.has(item.id));
   }
 
+  // Checkable without writing: what registered Local Storage writes want now,
+  // asked against the store as it is at this moment rather than as the plan
+  // saw it. One that throws, or asks for something refused, stops the run
+  // here, before a single byte of anything (groups included) is written: its
+  // keys were meant to land in the same batch as the groups' own, and landing
+  // those without them would be exactly the partial write the batch exists to
+  // prevent.
+  let storageWrites: { name: string; writes: LocalStorageTextWrite[] }[];
+  try {
+    storageWrites = collectLayoutStorageWrites(store, plan.target, nowMs);
+  } catch (error) {
+    throw new LayoutWriteError(written, 'storage (registered)', error);
+  }
+  const storageTextWrites: LocalStorageWrite[] = storageWrites.flatMap((entry) => entry.writes);
+
   // ---------------------------------------------------------------------
   // Phase 2 — write exactly what Phase 1 decided, and nothing else.
   // ---------------------------------------------------------------------
@@ -1263,8 +1431,14 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       try {
         backups.push(backupLocalStorage(store, { now: options.now, env: options.env }));
         const record = readLocalStorageValue(store, 'dframe-store') ?? currentLog(store);
-        writeLocalStorageEntries(record, groups.localStorageWrites);
+        // Registered writes ride in the same batch, behind the same backup:
+        // either every key in it lands or none does.
+        writeLocalStorageEntries(record, [...groups.localStorageWrites, ...storageTextWrites]);
         written.push('groups (Local Storage)');
+        if (storageTextWrites.length > 0) {
+          written.push('storage (registered)');
+          storageWritesLanded = true;
+        }
       } catch (error) {
         // This used to be swallowed into a "... FAILED" entry in
         // `written`, with no throw — the config copy really had landed, so
@@ -1275,6 +1449,21 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
         appendLedgerIfLanded();
         throw new LayoutWriteError(written, 'groups (Local Storage)', error);
       }
+    }
+  }
+
+  // No groups batch to ride in (nothing to file this run): the registered
+  // writes are their own batch, behind one backup, in one appended record.
+  if (!storageWritesLanded && storageTextWrites.length > 0) {
+    try {
+      backups.push(backupLocalStorage(store, { now: options.now, env: options.env }));
+      const record = localStorageWriteTarget(store, storageTextWrites[0]!.scriptKey);
+      writeLocalStorageEntries(record, storageTextWrites);
+      written.push('storage (registered)');
+      storageWritesLanded = true;
+    } catch (error) {
+      appendLedgerIfLanded();
+      throw new LayoutWriteError(written, 'storage (registered)', error);
     }
   }
 
@@ -1501,6 +1690,14 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     ...(pinsError ? { pinsError } : {}),
     marksBack,
     archiveMarksBack,
+    ...(storageWritesLanded
+      ? {
+          storageWrites: storageWrites.map((entry) => ({
+            name: entry.name,
+            keys: entry.writes.length,
+          })),
+        }
+      : {}),
     backups,
     written,
     assigned,
