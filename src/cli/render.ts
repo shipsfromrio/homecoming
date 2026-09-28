@@ -25,6 +25,7 @@ import type { LayoutGroupsCheck } from '../engine/layoutVerify.js';
 import type { AccountOverview } from '../store/accounts.js';
 import type { UpdateStatus } from '../update.js';
 import { VERSION } from '../version.js';
+import { programName } from '../programName.js';
 
 export function formatDate(ms: number | undefined): string {
   if (!ms) return '—';
@@ -73,7 +74,7 @@ export function formatRoutineFireAt(ms: number | undefined, now: Date = new Date
  */
 export function viewCopyRestartCommand(from: AccountRef, to: AccountRef): string {
   return (
-    `homecoming view copy --from ${from.accountUuid} --to ${to.accountUuid} ` +
+    `${programName()} view copy --from ${from.accountUuid} --to ${to.accountUuid} ` +
     `--to-org ${to.organizationUuid} --yes --restart`
   );
 }
@@ -281,7 +282,7 @@ export function layoutResultLines(result: ApplyLayoutResult): string[] {
   if (result.pinsError) {
     lines.push(
       pc.yellow(
-        `  pins not moved: ${result.pinsError} — still pending, the next homecoming layout tries again.`,
+        `  pins not moved: ${result.pinsError} — still pending, the next ${programName()} layout tries again.`,
       ),
     );
   }
@@ -317,7 +318,7 @@ export function layoutCheckLines(check: LayoutGroupsCheck): string[] {
     pc.dim(
       "  The app keeps its sidebar groups in step with the account's settings on the server,\n" +
         '  and at startup it kept its own list. File them from inside the app instead: its own\n' +
-        '  create_group and move_sessions tools, fed from "homecoming layout --json".',
+        `  create_group and move_sessions tools, fed from "${programName()} layout --json".`,
     ),
   ];
 }
@@ -661,8 +662,8 @@ function standingLine(standing: BranchStanding, restoring: boolean, originId: st
     ),
     pc.dim(
       restoring
-        ? `      homecoming restore --session ${shortId(originId)} --yes, then homecoming consolidate`
-        : `      homecoming consolidate --session ${shortId(standing.here)} --yes`,
+        ? `      ${programName()} restore --session ${shortId(originId)} --yes, then ${programName()} consolidate`
+        : `      ${programName()} consolidate --session ${shortId(standing.here)} --yes`,
     ),
   ].join('\n');
 }
@@ -927,7 +928,8 @@ export function sweepSummary(report: SweepReport): string[] {
       parts.push(`${layout.pinsToPin} pin${layout.pinsToPin === 1 ? '' : 's'} from other accounts`);
     if (layout.pinsToUnpin)
       parts.push(`${layout.pinsToUnpin} pin${layout.pinsToUnpin === 1 ? '' : 's'} to remove`);
-    if (layout.pinsClear) parts.push('the whole pin list to empty (homecoming pin --clear-all)');
+    if (layout.pinsClear)
+      parts.push(`the whole pin list to empty (${programName()} pin --clear-all)`);
     if (layout.machineViewKeysCarried)
       parts.push(
         `${layout.machineViewKeysCarried} sidebar setting${layout.machineViewKeysCarried === 1 ? '' : 's'}`,
@@ -938,7 +940,7 @@ export function sweepSummary(report: SweepReport): string[] {
       );
     // Never written by the sweep itself — see `SweepReport.layout` — so this is
     // always phrased as waiting, dry run or not.
-    lines.push(`Layout: ${parts.join(', ')} to bring — homecoming layout --yes --restart`);
+    lines.push(`Layout: ${parts.join(', ')} to bring — ${programName()} layout --yes --restart`);
   }
 
   const never = neverComesLine(report.neverComes);
@@ -971,7 +973,7 @@ export function sweepSummary(report: SweepReport): string[] {
         // to continue in, and a marked one says when it was left.
         `The branch that carried on keeps its title; the others wear "${branches.staleTemplate.trim()}" ` +
         'with the moment of their last answer.\n' +
-        'Nothing is hidden — homecoming consolidate collapses a fork to one row if you want that.',
+        `Nothing is hidden — ${programName()} consolidate collapses a fork to one row if you want that.`,
     );
   }
 
@@ -988,7 +990,7 @@ export function sweepSummary(report: SweepReport): string[] {
         `${marked} row${marked === 1 ? '' : 's'} marked${filed}.\n` +
         'The row whose last answer is the most recent keeps its title and is the one to continue in; ' +
         `the others wear "${files.otherFileTemplate.trim()}".\n` +
-        'Nothing is merged: each row still opens its own file, and homecoming consolidate does not join them.',
+        `Nothing is merged: each row still opens its own file, and ${programName()} consolidate does not join them.`,
     );
   }
 
@@ -1004,7 +1006,7 @@ export function sweepSummary(report: SweepReport): string[] {
       pc.yellow(
         `${report.liveWriters.length} of the conversations ${one ? 'has' : 'have'} a live writer. ` +
           `Opening the ${one ? 'copy' : 'copies'} branches the conversation instead of continuing it, ` +
-          'so finish there first — homecoming live names the process and its directory.',
+          `so finish there first — ${programName()} live names the process and its directory.`,
       ),
     );
   }
@@ -1157,7 +1159,7 @@ function unknownMarkNames(forks: ForkOutcome[], plans: readonly FilePlan[]): str
   const rest = rows.length - shown.length;
   const titles = shown.map((row) => `  ${row.title}`);
   const one = rows.length === 1;
-  const head = `${rows.length} row${one ? '' : 's'} ${one ? 'wears' : 'wear'} a mark homecoming cannot account for, left as ${one ? 'it is' : 'they are'}:`;
+  const head = `${rows.length} row${one ? '' : 's'} ${one ? 'wears' : 'wear'} a mark ${programName()} cannot account for, left as ${one ? 'it is' : 'they are'}:`;
   const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
   return (
     `${head}\n${titles.join('\n')}${tail}\n` +
@@ -1184,9 +1186,9 @@ function pinFixesLine(pinFixes: SweepReport['pinFixes']): string {
   // the archived one — and silence there reads as "nothing was pinned".
   if (pinFixes.unreadable) {
     return (
-      'Rows were marked stale, and homecoming could not read the pin list to see whether one of\n' +
+      `Rows were marked stale, and ${programName()} could not read the pin list to see whether one of\n` +
       `them was pinned: ${pinFixes.unreadable}\n` +
-      'The app holds that database while it runs. Check with "homecoming pin" after the restart.'
+      `The app holds that database while it runs. Check with "${programName()} pin" after the restart.`
     );
   }
   if (pinFixes.fixes.length === 0) return '';
@@ -1211,7 +1213,7 @@ function pinFixesLine(pinFixes: SweepReport['pinFixes']): string {
   }
   const why = pinFixes.blocked
     ? `\n${pinFixes.blocked}`
-    : '\nRe-run the sweep once the pin can be written, or move it by hand with "homecoming pin".';
+    : `\nRe-run the sweep once the pin can be written, or move it by hand with "${programName()} pin".`;
   return `${head}\n${named}${why}`;
 }
 

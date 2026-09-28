@@ -1,5 +1,6 @@
 import { listAccountMenuItems, listMenuItems, type AccountMenuItem } from '../extensions.js';
 import type { Choice, DashboardAccount } from './ui.js';
+import { programName } from '../programName.js';
 
 /**
  * The command menu. Values match the old clack menu so the flows and the
@@ -43,7 +44,7 @@ export const COMMANDS: Command[] = [
     value: 'status',
     slash: 'status',
     hotkey: 's',
-    label: 'What homecoming has done',
+    label: `What ${programName()} has done`,
     hint: 'copies currently in place',
   },
   {

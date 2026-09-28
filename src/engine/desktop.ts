@@ -26,6 +26,7 @@ import {
 } from '../util/processes.js';
 import { lockfileHeld } from './lockfile.js';
 import { scrubbedEnv } from './launchEnv.js';
+import { programName } from '../programName.js';
 
 export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
 
@@ -342,7 +343,7 @@ export function inspectDesktop(
         selfHosted: hostedByDesktop(env),
         uncertain:
           `${claudeCount} claude.exe process(es) are running, but the process table was read ` +
-          'through tasklist, which reports no paths, parent links or command lines — homecoming ' +
+          `through tasklist, which reports no paths, parent links or command lines — ${programName()} ` +
           'cannot tell the app from a Claude Code session',
       };
     }
@@ -620,15 +621,15 @@ export async function quitDesktop(
     // process table too thin to see the app at all, rather than one that sees
     // it and finds foster inside it).
     throw new DesktopControlError(
-      `homecoming cannot tell whether Claude Desktop is running: ${state.uncertain}.\n` +
-        'Quit it yourself, or see "homecoming doctor" for why the process table could not be read in full.',
+      `${programName()} cannot tell whether Claude Desktop is running: ${state.uncertain}.\n` +
+        `Quit it yourself, or see "${programName()} doctor" for why the process table could not be read in full.`,
     );
   }
   if (!state.running || state.mainPid === undefined) return { outcome: 'not-running' };
   if (state.selfHosted) {
     throw new DesktopControlError(
-      'homecoming is running inside Claude Desktop, so closing the app would kill this session part-way through.\n' +
-        'Run homecoming from a terminal outside the app, or quit the app yourself.',
+      `${programName()} is running inside Claude Desktop, so closing the app would kill this session part-way through.\n` +
+        `Run ${programName()} from a terminal outside the app, or quit the app yourself.`,
     );
   }
 

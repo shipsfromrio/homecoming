@@ -27,6 +27,7 @@ import {
 import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
 import { AppRunningError, inspectApp } from './safety.js';
 import { readProcesses, type ProcessLister } from './desktop.js';
+import { programName } from '../programName.js';
 
 /**
  * The Code sidebar's filter menu — reading and changing both halves at once.
@@ -302,7 +303,7 @@ export function applyViewSet(plan: ViewSetPlan, options: ApplyViewOptions): { ba
     if (!machineRecord) {
       throw new Error(
         'Local Storage has never recorded the sidebar filters — open the Code sidebar in ' +
-          'Claude Desktop once, so there is a record for homecoming to change.',
+          `Claude Desktop once, so there is a record for ${programName()} to change.`,
       );
     }
   }

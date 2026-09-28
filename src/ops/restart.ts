@@ -1,6 +1,7 @@
 import type { StoreLayout } from '../domain/types.js';
 import { quitDesktop, startDesktop, trayNote } from '../engine/desktop.js';
 import { restartPlan } from './sweep.js';
+import { programName } from '../programName.js';
 
 /**
  * Quit Claude Desktop, optionally do something while it is down, then start it
@@ -90,7 +91,7 @@ export async function restartAround(
             done: false,
             closed: false,
             reason:
-              `${trayNote('Close it with "homecoming app quit --terminate"')}\n` +
+              `${trayNote(`Close it with "${programName()} app quit --terminate"`)}\n` +
               'Nothing was written. Once it is closed, run:',
             command,
           };
@@ -100,7 +101,7 @@ export async function restartAround(
           done: false,
           closed: false,
           reason: trayNote('Finish it with'),
-          command: 'homecoming app restart --terminate',
+          command: `${programName()} app restart --terminate`,
         };
       }
       if (quitResult.outcome !== 'quit' && quitResult.outcome !== 'not-running') {

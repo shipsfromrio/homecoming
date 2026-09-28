@@ -11,6 +11,7 @@ import { fitsInLatin1, locateLog, newestValue, nextWriteSequence } from './level
 import { appendSynced } from '../util/fsatomic.js';
 import { safeReaddir } from '../util/fs.js';
 import type { StoreLayout } from '../domain/types.js';
+import { programName } from '../programName.js';
 
 /**
  * The sidebar's pinned sessions.
@@ -215,7 +216,7 @@ export function readPinState(store: StoreLayout): PinState | undefined {
   const noDatabase = (message: string): PinStateError => new PinStateError(message);
   const noDatabaseMessage =
     `No IndexedDB database at ${directory}.\n` +
-    'Pinning is stored there, so there is nothing for homecoming to read or change.';
+    `Pinning is stored there, so there is nothing for ${programName()} to read or change.`;
 
   // The id first, because the key every read and write below is built from
   // depends on it. Looked for in the log and then in the sorted tables, in
@@ -260,7 +261,7 @@ export function readPinState(store: StoreLayout): PinState | undefined {
   const tag = record.indexOf(ONE_BYTE_STRING, version.next);
   if (tag === -1) {
     throw new PinStateError(
-      'The pin record does not carry the string envelope homecoming expects.',
+      `The pin record does not carry the string envelope ${programName()} expects.`,
     );
   }
 
@@ -348,7 +349,7 @@ export function writePinState(state: PinState, ids: string[]): void {
         'this module only ever writes the one-byte-per-character envelope readPinState recognises. ' +
         'Encoding it anyway would silently truncate every such character to its low byte. Session ids ' +
         'and JSON punctuation are always ASCII, so this means some other field in the pinned document ' +
-        'carries non-Latin-1 text; homecoming refuses to write a corrupted copy of it.',
+        `carries non-Latin-1 text; ${programName()} refuses to write a corrupted copy of it.`,
     );
   }
   const payload = Buffer.from(json, 'latin1');

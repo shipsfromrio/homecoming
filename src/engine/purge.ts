@@ -3,6 +3,7 @@ import type { Ledger } from '../ledger/log.js';
 import type { Purgeable } from '../store/purge.js';
 import { errorMessage } from '../util/fs.js';
 import { removeSafely } from '../util/fsatomic.js';
+import { programName } from '../programName.js';
 
 /**
  * Destroy the conversations behind deleted sessions.
@@ -188,10 +189,10 @@ export class PurgeNotConfirmedError extends Error {
 export function assertPurgeConfirmed(confirm: string | undefined, count: number): void {
   if (confirm === undefined) {
     throw new PurgeNotConfirmedError(
-      'Destroying conversations is permanent: there is no undo, and homecoming keeps no copy.\n' +
+      `Destroying conversations is permanent: there is no undo, and ${programName()} keeps no copy.\n` +
         'Read the list first, then confirm the count:\n' +
-        '  homecoming purge                       (writes nothing)\n' +
-        `  homecoming purge --yes --confirm ${count}`,
+        `  ${programName()} purge                       (writes nothing)\n` +
+        `  ${programName()} purge --yes --confirm ${count}`,
     );
   }
 
@@ -205,7 +206,7 @@ export function assertPurgeConfirmed(confirm: string | undefined, count: number)
     throw new PurgeNotConfirmedError(
       `--confirm ${expected} does not match the ${count} conversation(s) this run would destroy.\n` +
         'Either the filters do not select what you expected, or the set changed since you looked.\n' +
-        'Re-read it with "homecoming purge" and confirm the number it prints.',
+        `Re-read it with "${programName()} purge" and confirm the number it prints.`,
     );
   }
 }

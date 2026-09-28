@@ -27,6 +27,7 @@ import {
 import { showAccountDetails, showAccounts, showStatus } from './screens.js';
 import { BACK_OPTION } from './prompts.js';
 import { describeRef, labelsOf, nameEverything } from './names.js';
+import { programName } from '../programName.js';
 
 type Action = (ctx: MenuContext, accountUuid?: string) => Promise<void | MenuOutcome>;
 
@@ -52,7 +53,7 @@ export async function runInteractive(
 
 async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Promise<void> {
   let store = initialStore;
-  ui.intro(`${pc.bgCyan(pc.black(' homecoming '))} ${pc.dim(VERSION)}`);
+  ui.intro(`${pc.bgCyan(pc.black(` ${programName()} `))} ${pc.dim(VERSION)}`);
 
   const update = checkForUpdate();
   nameEverything(store);
@@ -70,7 +71,7 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
 
   const status = await update;
   if (status?.outdated) {
-    ui.log.warn(`homecoming ${status.latest} is available (you have ${status.current}).`);
+    ui.log.warn(`${programName()} ${status.latest} is available (you have ${status.current}).`);
     ui.log.message(pc.dim(status.command));
   }
 

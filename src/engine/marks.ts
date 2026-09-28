@@ -4,6 +4,7 @@ import type { DiscoveredSession } from '../domain/types.js';
 import type { LedgerState } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import type { RetitleRequest } from './retitle.js';
+import { programName } from '../programName.js';
 
 /**
  * Putting a mark on a row, and taking one off.
@@ -25,7 +26,7 @@ import type { RetitleRequest } from './retitle.js';
  * summary, and with the tests that pin the shape down — a string typed once
  * cannot drift between the place that writes it and the place that reads it.
  */
-export const UNKNOWN_MARK_DETAIL = 'wears a mark homecoming cannot account for — left as it is';
+export const UNKNOWN_MARK_DETAIL = `wears a mark ${programName()} cannot account for — left as it is`;
 
 /**
  * What to do about one card — write a mark, leave it because there is nothing

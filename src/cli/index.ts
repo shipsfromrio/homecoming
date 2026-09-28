@@ -283,6 +283,7 @@ import {
   viewNoticeLines,
   writtenOf,
 } from './render.js';
+import { programName } from '../programName.js';
 
 interface GlobalOptions {
   store?: string;
@@ -293,13 +294,13 @@ interface GlobalOptions {
 const program = new Command();
 
 program
-  .name('homecoming')
+  .name(`${programName()}`)
   .description(
     "Bring Claude Desktop Code sessions from a previous local account into the current account's sidebar",
   )
   .version(VERSION)
   .option('--store <path>', 'path to the Claude Desktop userData directory')
-  .option('--ledger <path>', "path to homecoming's ledger file")
+  .option('--ledger <path>', `path to ${programName()}'s ledger file`)
   .option(
     '--no-cache',
     'skip the persistent scan cache under <FOSTER_HOME>/cache (same as FOSTER_NO_CACHE=1)',
@@ -556,7 +557,7 @@ program
       return;
     }
 
-    console.log(pc.bold('homecoming'));
+    console.log(pc.bold(`${programName()}`));
     console.log(`  ${updateLine(await checkForUpdate())}`);
 
     console.log(pc.bold('Store'));
@@ -603,7 +604,7 @@ program
           cache.newestMtimeMs === undefined ? 'unknown' : formatDate(cache.newestMtimeMs)
         }`,
       );
-      console.log(pc.dim(`  ${cache.dir} — homecoming cache clear to empty it`));
+      console.log(pc.dim(`  ${cache.dir} — ${programName()} cache clear to empty it`));
     }
 
     console.log(pc.bold('State'));
@@ -641,7 +642,7 @@ function printDoctorChecks(results: { name: string; findings: DoctorFinding[] }[
 program
   .command('stores')
   .helpGroup('Start here:')
-  .description('installations homecoming knows about, and what to pass to --store')
+  .description(`installations ${programName()} knows about, and what to pass to --store`)
   .option('--json', 'machine-readable output')
   .action(describeStores);
 
@@ -825,7 +826,7 @@ program
   .option(
     '--prove',
     'after planning, independently check every conversation is fully reachable from this account ' +
-      '(exit 1 on any gap) — see `homecoming verify` for the layout-groups half of the same question',
+      `(exit 1 on any gap) — see \`${programName()} verify\` for the layout-groups half of the same question`,
   )
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -1022,7 +1023,7 @@ async function runSweepCommand(
   // layout pending: its gap is the one that writes back any mark the running
   // app saves over in the meantime (`engine/marksBack.ts`).
   const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
-  const restartCommand = `homecoming ${sweepDetachArgv(layoutPending, restartCarry).join(' ')}`;
+  const restartCommand = `${programName()} ${sweepDetachArgv(layoutPending, restartCarry).join(' ')}`;
 
   if (opts.json) {
     if (opts.detach) {
@@ -1607,7 +1608,7 @@ function printDetachResult(outcome: DetachOutcome, json: boolean, note?: string)
       ),
     );
     console.log(pc.dim(`Log: ${outcome.plan.logPath}`));
-    console.log(pc.dim('Verify once it is back with: homecoming detached --last'));
+    console.log(pc.dim(`Verify once it is back with: ${programName()} detached --last`));
     return;
   }
   console.log(pc.yellow(`\n${outcome.reason}`));
@@ -1898,7 +1899,7 @@ sourceOptions(
       const message = error instanceof Error ? error.message : String(error);
       const unknown = message.startsWith('No session matches');
       throw new Error(
-        unknown ? `${message}\nRun "homecoming list --all" to see the ids.` : message,
+        unknown ? `${message}\nRun "${programName()} list --all" to see the ids.` : message,
       );
     }
   }
@@ -1954,7 +1955,7 @@ sourceOptions(
       : pc.yellow(
           `\n${behind} of the skipped ${behind === 1 ? 'is' : 'are'} the half of a fork that carried on; ` +
             `this account is showing the half that stopped.\n` +
-            'homecoming consolidate lists them with their record counts. Run it before the restart, ' +
+            `${programName()} consolidate lists them with their record counts. Run it before the restart, ` +
             'not after: a card the app itself made waits either way.',
         );
 
@@ -2032,7 +2033,7 @@ program
       if (unmatched.length > 0) {
         throw new Error(
           `No deleted conversation matches --session ${unmatched.join(', ')}.\n` +
-            'Run "homecoming restore" with no --yes to see what is available.',
+            `Run "${programName()} restore" with no --yes to see what is available.`,
         );
       }
       candidates = selected;
@@ -2349,7 +2350,7 @@ program
     if (appMade.length > 0) {
       console.log(pc.dim(`${appMade.length} left to the app — see above.`));
     }
-    console.log(pc.dim('Undo the moves with: homecoming consolidate --undo --yes'));
+    console.log(pc.dim(`Undo the moves with: ${programName()} consolidate --undo --yes`));
     await finish(store, Boolean(opts.restart));
   });
 
@@ -2493,7 +2494,9 @@ function appMadeLines(entry: ConsolidationEntry): string[] {
     ...entry.keptApart.map((kept) =>
       pc.dim(`    also on ${shortConversation(kept.cliSessionId)} as ${shortId(kept.sessionId)}`),
     ),
-    pc.dim('    the app wrote both cards, so homecoming leaves them — delete the spare row there'),
+    pc.dim(
+      `    the app wrote both cards, so ${programName()} leaves them — delete the spare row there`,
+    ),
   ];
 }
 
@@ -2570,7 +2573,7 @@ function reportDuplicates(report: DuplicateReport): void {
     console.log(
       pc.yellow(
         `${report.copies.length} of them duplicate${one ? 's' : ''} a conversation this account already had.` +
-          `\nRemove ${one ? 'it' : 'them'} with: homecoming return --duplicates`,
+          `\nRemove ${one ? 'it' : 'them'} with: ${programName()} return --duplicates`,
       ),
     );
   }
@@ -2580,7 +2583,7 @@ function reportDuplicates(report: DuplicateReport): void {
       pc.yellow(
         `${report.branches.length} of them ${one ? 'is a branch' : 'are branches'} of a conversation this account already had.` +
           '\nSame work, forked: each side holds turns the other never got, so read both before' +
-          `\nchoosing. Remove ${one ? 'it' : 'them'} with: homecoming return --branches`,
+          `\nchoosing. Remove ${one ? 'it' : 'them'} with: ${programName()} return --branches`,
       ),
     );
   }
@@ -2701,12 +2704,12 @@ program
     console.log(
       pc.dim(
         "Like a retitle, this shows only at the app's next restart — restart Claude Desktop, " +
-          'or run "homecoming app restart". A card the app rewrites in the meantime keeps (or ' +
-          'regains) its claim on disk, and the next "homecoming unclaim" or sweep finds and ' +
+          `or run "${programName()} app restart". A card the app rewrites in the meantime keeps (or ` +
+          `regains) its claim on disk, and the next "${programName()} unclaim" or sweep finds and ` +
           'releases it again.',
       ),
     );
-    console.log(pc.dim('Undo with: homecoming unclaim --undo --yes'));
+    console.log(pc.dim(`Undo with: ${programName()} unclaim --undo --yes`));
   });
 
 function undoUnclaimCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: boolean): void {
@@ -2827,11 +2830,11 @@ program
     console.log(
       pc.dim(
         "Like a retitle, this shows only at the app's next restart — restart Claude Desktop, " +
-          'or run "homecoming app restart". A card the app rewrites in the meantime keeps (or ' +
-          'regains) its own date, and the next "homecoming dates" finds and advances it again.',
+          `or run "${programName()} app restart". A card the app rewrites in the meantime keeps (or ` +
+          `regains) its own date, and the next "${programName()} dates" finds and advances it again.`,
       ),
     );
-    console.log(pc.dim('Undo with: homecoming dates --undo --yes'));
+    console.log(pc.dim(`Undo with: ${programName()} dates --undo --yes`));
   });
 
 function undoDatesCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: boolean): void {
@@ -2892,7 +2895,7 @@ const layoutCmd = program
       'already overdue is not brought at all — the app runs an overdue task at its next\n' +
       'launch, and a stale one firing unasked is worse than one left behind.\n\n' +
       "Both files are the app's own and it rewrites them from memory, so — like\n" +
-      '"homecoming pin" — a write here needs the app closed.',
+      `"${programName()} pin" — a write here needs the app closed.`,
   )
   .option('--to <accountUuid>', 'write into this account instead')
   .option('--to-org <organizationUuid>', 'write into this organization')
@@ -3153,7 +3156,7 @@ const view = program
       'per account in claude_desktop_config.json. Bare, this shows all seven, this\n' +
       "account's value for each, and where it lives.\n\n" +
       "Both files are the app's own and it rewrites them from memory, so — like\n" +
-      '"homecoming layout" — a write needs the app closed.',
+      `"${programName()} layout" — a write needs the app closed.`,
   )
   .option('--to <accountUuid>', 'read this account instead of the one signed in')
   .option('--json', 'machine-readable output')
@@ -3657,7 +3660,9 @@ program
         console.log(name ? `${line}  ${pc.dim(name)}` : line);
       }
       console.log(pc.bold(`\n${active.length} active fostering(s)`));
-      console.log(pc.dim('homecoming status --all lists them; --to <accountUuid> narrows to one.'));
+      console.log(
+        pc.dim(`${programName()} status --all lists them; --to <accountUuid> narrows to one.`),
+      );
       reportDuplicates(findDuplicates(store, active));
       if (elsewhere.length > 0) {
         console.log(
@@ -3720,7 +3725,7 @@ program
       if (!accountUuid) {
         throw new Error(
           'No account is recorded as signed in, so there is nothing to clear.\n' +
-            'Name the account outright: homecoming label <accountUuid> --clear.',
+            `Name the account outright: ${programName()} label <accountUuid> --clear.`,
         );
       }
       const had = project(ledger.read()).labels.get(accountUuid);
@@ -3753,7 +3758,7 @@ program
       if (!fromCache) {
         throw new Error(
           "Nothing is known about this account — the app's cache holds no profile for it.\n" +
-            'Name it by hand instead: homecoming label "a name".',
+            `Name it by hand instead: ${programName()} label "a name".`,
         );
       }
       ledger.append({
@@ -3831,12 +3836,14 @@ program
         pc.dim(
           "Nothing found in the app's cache for this account.\n" +
             'The profile may be stored differently in this app version. You can still name it by hand:\n' +
-            '  homecoming label "a name"',
+            `  ${programName()} label "a name"`,
         ),
       );
       return;
     }
-    console.log(pc.dim(`\nName the account with this in one step:  homecoming label --from-cache`));
+    console.log(
+      pc.dim(`\nName the account with this in one step:  ${programName()} label --from-cache`),
+    );
   });
 
 const cacheCommand = program
@@ -3848,7 +3855,7 @@ cacheCommand
   .command('clear')
   .summary('delete the persistent scan cache')
   .description(
-    'Remove every file under the persistent cache homecoming keeps to skip re-reading\n' +
+    `Remove every file under the persistent cache ${programName()} keeps to skip re-reading\n` +
       'cards and transcripts that have not changed since the last run.\n\n' +
       'Nothing here is a record of anything — the next scan simply reads from disk\n' +
       'again and rebuilds it, the same as an entry `--no-cache` or a version mismatch\n' +
@@ -3878,7 +3885,7 @@ program
       console.log('No account has a name yet.');
       console.log(
         pc.dim(
-          'homecoming label names one by hand; the signed-in one is named from its cached e-mail.',
+          `${programName()} label names one by hand; the signed-in one is named from its cached e-mail.`,
         ),
       );
       return;
@@ -3897,7 +3904,7 @@ program
   .description(
     'Pin or unpin sessions in the Claude Desktop sidebar.\n\n' +
       'Pinning is not part of a session file. The app keeps it in its own ' +
-      'IndexedDB, keyed on the session id — and homecoming mints a fresh id for ' +
+      `IndexedDB, keyed on the session id — and ${programName()} mints a fresh id for ` +
       'every copy, so a copy of a pinned session always arrives unpinned. That is ' +
       'the gap this closes.\n\n' +
       'The database belongs to the app and is locked while it runs, so Claude ' +
@@ -3930,9 +3937,9 @@ program
       console.log('Nothing has ever been pinned in this installation.');
       console.log(
         pc.dim(
-          'homecoming copies the record the app writes rather than inventing one, because that record\n' +
+          `${programName()} copies the record the app writes rather than inventing one, because that record\n` +
             'carries a serialiser version it has no business guessing. Pin any session in the\n' +
-            'sidebar once, and homecoming can do the rest from then on.',
+            `sidebar once, and ${programName()} can do the rest from then on.`,
         ),
       );
       return;
@@ -3960,7 +3967,7 @@ program
         ledger.append({ kind: 'pins_clear_deferred' });
         console.log(
           `Claude Desktop is running, so its pin list cannot be written now. Queued: the next\n` +
-            `"homecoming layout --yes --restart" empties all ${state.ids.length} pin(s) while the app is closed.`,
+            `"${programName()} layout --yes --restart" empties all ${state.ids.length} pin(s) while the app is closed.`,
         );
         return;
       }
@@ -4000,7 +4007,7 @@ program
     if (wanted.unmatched.length > 0) {
       throw new Error(
         `No ${opts.remove ? 'pinned session' : 'session'} matches --session ${wanted.unmatched.join(', ')}.\n` +
-          'Run "homecoming pin" with no arguments to see what is there.',
+          `Run "${programName()} pin" with no arguments to see what is there.`,
       );
     }
 
@@ -4066,7 +4073,7 @@ program
         `Claude Desktop is running (${app.evidence.join('; ')}).\n` +
           'Its IndexedDB is locked and holds writes that are not on disk yet, so changing the\n' +
           'pin list now would be overwritten the moment it flushes. Close it first — ' +
-          '"homecoming app quit --terminate" will.',
+          `"${programName()} app quit --terminate" will.`,
       );
     }
 
@@ -4171,7 +4178,7 @@ program
       if (unmatched.length > 0) {
         throw new Error(
           `No purgeable conversation matches --session ${unmatched.join(', ')}.\n` +
-            'Run "homecoming purge" with no --yes to see what is available.',
+            `Run "${programName()} purge" with no --yes to see what is available.`,
         );
       }
       candidates = candidates.filter((item) => wanted.some((id) => matches(item, id)));
@@ -4237,7 +4244,7 @@ program
       );
       console.log(
         pc.red(
-          'This cannot be undone, and homecoming keeps no copy. Read the list before confirming.',
+          `This cannot be undone, and ${programName()} keeps no copy. Read the list before confirming.`,
         ),
       );
       console.log(pc.dim(`Re-run with --yes --confirm ${counts.purged} to destroy them.`));
@@ -4511,7 +4518,7 @@ program
       'print the answer.\n\n' +
       'This appends to the conversation, so it refuses when a live claude process ' +
       'is holding the conversation open — two writers on one transcript is how ' +
-      'transcripts get corrupted. `homecoming live` shows what is being held right ' +
+      `transcripts get corrupted. \`${programName()} live\` shows what is being held right ` +
       'now.',
   )
   .argument('<cliSessionId>', 'the conversation id')
@@ -4612,9 +4619,11 @@ program
       console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(detail)}`);
     }
     console.log(
-      pc.dim('\nThese conversations have a writer; `homecoming resume` will refuse them.'),
+      pc.dim(`\nThese conversations have a writer; \`${programName()} resume\` will refuse them.`),
     );
-    console.log(pc.dim('`homecoming live --stop <id>` ends one, so its copy can be opened.'));
+    console.log(
+      pc.dim(`\`${programName()} live --stop <id>\` ends one, so its copy can be opened.`),
+    );
     sayIfStale(roots);
   });
 
@@ -5033,14 +5042,14 @@ program
   .description(
     'Read-only measurement of everything on disk, across every account this store ' +
       'has: card and transcript bytes broken down by account and by working ' +
-      "directory, how much of a card's own JSON is fields nothing in homecoming " +
+      `directory, how much of a card's own JSON is fields nothing in ${programName()} ` +
       'reads (mostly remoteMcpServersConfig), transcripts no card in any account ' +
       'still points at, ' +
       'transcript files that are byte-for-byte copies of each other, and session ' +
       "cards already over the app's own 10 MB load limit and so will not appear in " +
       'it.\n\n' +
       'Nothing here deletes anything, and nothing here decides a file is safe to ' +
-      "remove — that judgement is `homecoming purge`'s, and it requires a tombstone " +
+      `remove — that judgement is \`${programName()} purge\`'s, and it requires a tombstone ` +
       'this does not. Reading every card and every transcript on a large store ' +
       'takes a while; it stays read-only throughout, the same guarantee every other ' +
       'report in this tool gives.',
@@ -5164,7 +5173,7 @@ function diskReportLines(report: DiskReport, labels: Map<string, string>): strin
     lines.push(
       '',
       `${report.orphanTranscripts.length} transcript(s) (${formatBytes(bytes)}) have no card in any ` +
-        'account — never tombstoned, so `homecoming purge` will not offer them; remove by hand if sure.',
+        `account — never tombstoned, so \`${programName()} purge\` will not offer them; remove by hand if sure.`,
     );
   }
 
@@ -5253,13 +5262,13 @@ program
       'files it occupies and which each card opens, and which row is actually worth ' +
       'opening.\n\n' +
       '`query` matches a session id or `cliSessionId` (bare, `local_`-prefixed, or ' +
-      'any unique prefix), or a title fragment. Every installation `homecoming` ' +
+      `any unique prefix), or a title fragment. Every installation \`${programName()}\` ` +
       'already knows about is searched (the installed app and any a store provider ' +
       'offers), not just the one `--store` would resolve to.\n\n' +
       'A fragment matching more than one conversation lists the candidates and ' +
       'exits 1 rather than guessing. Two ids that share a root — a fork, or the ' +
       'same id opened from two working directories — are one conversation here, ' +
-      "ranked by the exact election `homecoming sweep`'s own fileCards pass runs " +
+      `ranked by the exact election \`${programName()} sweep\`'s own fileCards pass runs ` +
       '(not a re-implementation of it): the last answer, then records held that no ' +
       'sibling file holds, then the last message of any kind, then sheer size. When ' +
       'that election still ties — several rows open the very same file — the row in ' +
@@ -5314,7 +5323,9 @@ program
       if (opts.json) {
         print({ query, matches: [] });
       } else {
-        console.log(`No conversation matches "${query}" in any store homecoming knows about.`);
+        console.log(
+          `No conversation matches "${query}" in any store ${programName()} knows about.`,
+        );
       }
       process.exitCode = 1;
       return;
@@ -5425,7 +5436,7 @@ function printWhere(report: WhereReport): void {
       console.log(pc.dim(`    ${row.copiesMadeFromHere} copy/copies made from this card`));
     }
     if (row.mark) {
-      console.log(pc.dim(`    marked by homecoming: "${row.mark.from}" -> "${row.mark.to}"`));
+      console.log(pc.dim(`    marked by ${programName()}: "${row.mark.from}" -> "${row.mark.to}"`));
     }
     console.log('');
   }
@@ -5442,21 +5453,21 @@ function printWhere(report: WhereReport): void {
 program
   .command('verify')
   .helpGroup('After the sweep:')
-  .summary('after a restart, check nothing homecoming wrote was undone')
+  .summary(`after a restart, check nothing ${programName()} wrote was undone`)
   .description(
-    'Read back every write the ledger says homecoming made to this account — card\n' +
+    `Read back every write the ledger says ${programName()} made to this account — card\n` +
       'titles and archived flags, pins, sidebar groups and routines — and say which\n' +
-      'of them the app has since reverted. Meant to run after `homecoming layout --yes\n' +
+      `of them the app has since reverted. Meant to run after \`${programName()} layout --yes\n` +
       '--restart` (or `sweep --restart`) has quit and restarted the app: both write\n' +
       "in the gap while it is closed, and the app's own startup can save some of it\n" +
       'straight back over — measured twice on a real store, once for marks and once\n' +
       'for sidebar groups (see docs/guide).\n\n' +
       'Titles, archived flags and pins are checked exactly: the ledger alone proves\n' +
-      'whether a card is back under a title it wore before homecoming touched it, or a\n' +
+      `whether a card is back under a title it wore before ${programName()} touched it, or a\n` +
       'pin move never landed. Groups and routines cannot be checked as exactly — the\n' +
       'ledger keeps only counts of what a layout run applied, not which card went\n' +
       'into which group — so this only flags the shape actually measured once: an\n' +
-      'account homecoming has applied groups or routines to before, now showing none,\n' +
+      `account ${programName()} has applied groups or routines to before, now showing none,\n` +
       'while a fresh plan still wants to bring some. Anything short of that is\n' +
       'reported as pending, not asserted as undone. Read-only; writes nothing.',
   )
@@ -5481,7 +5492,7 @@ function printVerify(report: VerifyReport): void {
   console.log(pc.bold(`Verifying ${report.target.accountUuid}`));
 
   if (report.marks.pending.length === 0) {
-    console.log(pc.dim('  titles/archived flags: every mark homecoming wrote still stands.'));
+    console.log(pc.dim(`  titles/archived flags: every mark ${programName()} wrote still stands.`));
   } else {
     console.log(
       pc.red(`  titles/archived flags: ${report.marks.pending.length} reverted by the app:`),
@@ -5493,7 +5504,7 @@ function printVerify(report: VerifyReport): void {
 
   if (report.archiveMarks.pending.length === 0) {
     console.log(
-      pc.dim('  archived flags (archive sync): every write homecoming made still stands.'),
+      pc.dim(`  archived flags (archive sync): every write ${programName()} made still stands.`),
     );
   } else {
     console.log(
@@ -5531,8 +5542,8 @@ function printVerify(report: VerifyReport): void {
     console.log(
       pc.dim(
         `  groups: ${report.groups.nowGroups} group(s), ${report.groups.nowAssignments} assignment(s) now; ` +
-          `a fresh \`homecoming layout\` would still bring ${report.groups.pendingNewGroups} group(s) and ` +
-          `${report.groups.pendingAssignments} assignment(s) — not necessarily undone, see \`homecoming verify --help\`.`,
+          `a fresh \`${programName()} layout\` would still bring ${report.groups.pendingNewGroups} group(s) and ` +
+          `${report.groups.pendingAssignments} assignment(s) — not necessarily undone, see \`${programName()} verify --help\`.`,
       ),
     );
   } else {
@@ -5549,7 +5560,7 @@ function printVerify(report: VerifyReport): void {
   } else if (report.routines.pendingBring > 0) {
     console.log(
       pc.dim(
-        `  routines: ${report.routines.nowCount} now; a fresh \`homecoming layout\` would still bring ` +
+        `  routines: ${report.routines.nowCount} now; a fresh \`${programName()} layout\` would still bring ` +
           `${report.routines.pendingBring} — not necessarily undone.`,
       ),
     );
@@ -5558,7 +5569,9 @@ function printVerify(report: VerifyReport): void {
   }
 
   if (report.pinParity.undone.length === 0) {
-    console.log(pc.dim('  pins from other accounts: every pin homecoming added still stands.'));
+    console.log(
+      pc.dim(`  pins from other accounts: every pin ${programName()} added still stands.`),
+    );
   } else {
     console.log(
       pc.red(`  pins from other accounts: ${report.pinParity.undone.length} no longer pinned.`),
@@ -5566,11 +5579,11 @@ function printVerify(report: VerifyReport): void {
   }
 
   if (report.groupAssignments.undone.length === 0) {
-    console.log(pc.dim('  group filings: every row homecoming filed is still in its group.'));
+    console.log(pc.dim(`  group filings: every row ${programName()} filed is still in its group.`));
   } else {
     console.log(
       pc.red(
-        `  group filings: ${report.groupAssignments.undone.length} no longer where homecoming filed them:`,
+        `  group filings: ${report.groupAssignments.undone.length} no longer where ${programName()} filed them:`,
       ),
     );
     for (const entry of report.groupAssignments.undone) {
@@ -5579,11 +5592,11 @@ function printVerify(report: VerifyReport): void {
   }
 
   if (report.viewCarried.undone.length === 0) {
-    console.log(pc.dim('  sidebar settings: every value homecoming carried still stands.'));
+    console.log(pc.dim(`  sidebar settings: every value ${programName()} carried still stands.`));
   } else {
     console.log(
       pc.red(
-        `  sidebar settings: ${report.viewCarried.undone.length} changed since homecoming carried them:`,
+        `  sidebar settings: ${report.viewCarried.undone.length} changed since ${programName()} carried them:`,
       ),
     );
     for (const entry of report.viewCarried.undone) {
@@ -5599,9 +5612,9 @@ function printVerify(report: VerifyReport): void {
   console.log(
     report.undone
       ? pc.red(
-          'Something homecoming wrote was undone. Run `homecoming layout --yes --restart` to write it again.',
+          `Something ${programName()} wrote was undone. Run \`${programName()} layout --yes --restart\` to write it again.`,
         )
-      : pc.bold('Nothing homecoming wrote here has been undone.'),
+      : pc.bold(`Nothing ${programName()} wrote here has been undone.`),
   );
 }
 
@@ -5659,7 +5672,7 @@ function sayIfStale(roots: string[]): void {
   console.log(
     pc.dim(
       `\n${records.length} registry ${records.length === 1 ? 'entry names' : 'entries name'} a ` +
-        'process that is gone or has been replaced.\n`homecoming live --prune` clears them.',
+        `process that is gone or has been replaced.\n\`${programName()} live --prune\` clears them.`,
     ),
   );
 }
@@ -5778,8 +5791,8 @@ async function reportStopped(
       console.log(
         pc.yellow(
           `${head}\n` +
-            '    This is the session homecoming is running in. Ending it would kill this command\n' +
-            '    part-way through. Close it yourself, or run homecoming from another terminal.',
+            `    This is the session ${programName()} is running in. Ending it would kill this command\n` +
+            `    part-way through. Close it yourself, or run ${programName()} from another terminal.`,
         ),
       );
     } else if (outcome === 'refused-unidentified') {
@@ -5877,7 +5890,7 @@ function reportDesktop(command: Command): void {
     for (const s of hosted) console.log(pc.dim(`    ${s.sessionId}  (pid ${s.pid})`));
   }
   if (state.selfHosted)
-    console.log(pc.yellow('  homecoming is running inside it, so it cannot close it'));
+    console.log(pc.yellow(`  ${programName()} is running inside it, so it cannot close it`));
 }
 
 app

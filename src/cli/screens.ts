@@ -10,6 +10,7 @@ import { scanAccount, summariseAccount } from '../store/scanner.js';
 import type { Ui } from '../tui/ui.js';
 import { labelsOf } from './names.js';
 import { accountTree, formatDate, groupByAccount, renderAccount, shortId } from './render.js';
+import { programName } from '../programName.js';
 
 export function showStatus(ui: Ui, ledger: Ledger, store: StoreLayout): void {
   const active = listActive(project(ledger.read()));
@@ -45,7 +46,7 @@ export function showStatus(ui: Ui, ledger: Ledger, store: StoreLayout): void {
     ui.log.info(
       pc.dim(
         `${duplicates.appMade} conversation(s) here have more than one card the app itself made. ` +
-          'homecoming did not write those and will not remove them.',
+          `${programName()} did not write those and will not remove them.`,
       ),
     );
   }

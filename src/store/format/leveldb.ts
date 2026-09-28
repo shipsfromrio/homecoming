@@ -34,6 +34,7 @@
  */
 
 import { snappyDecompress } from './snappy.js';
+import { programName } from '../../programName.js';
 
 export const BLOCK_SIZE = 32_768;
 export const HEADER_SIZE = 7;
@@ -467,7 +468,7 @@ function readBlock(table: Buffer, offset: number, size: number): Buffer {
   if (compression === 0) return contents;
   if (compression === 1) return snappyDecompress(contents);
   throw new LevelDbFormatError(
-    `sorted table block uses compression type ${compression}, which homecoming cannot read`,
+    `sorted table block uses compression type ${compression}, which ${programName()} cannot read`,
   );
 }
 

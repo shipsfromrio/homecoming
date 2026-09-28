@@ -119,3 +119,4 @@ export { registerCredentialProbe, type CredentialProbe } from './store/config.js
 export { commandPath } from './cli/commandPath.js';
 export type { AccountRef, StoreLayout } from './domain/types.js';
 export { VERSION } from './version.js';
+export { programName, setProgramName } from './programName.js';

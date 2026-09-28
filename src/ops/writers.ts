@@ -8,6 +8,7 @@ import {
   type LiveCliSession,
 } from '../store/liveSessions.js';
 import { readProcesses, type ProcessLister } from '../util/processes.js';
+import { programName } from '../programName.js';
 
 /**
  * Ending the processes that hold conversations open.
@@ -85,7 +86,7 @@ export function selectWriters(sessions: LiveCliSession[], wanted: string[]): Liv
     const found = uniquePrefix(sessions, prefix, (session) => session.sessionId);
     if (found.kind === 'none') {
       throw new Error(
-        `No live session matches ${prefix}.\nRun "homecoming live" to see what is running.`,
+        `No live session matches ${prefix}.\nRun "${programName()} live" to see what is running.`,
       );
     }
     if (found.kind === 'ambiguous') {
