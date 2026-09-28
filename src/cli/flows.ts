@@ -31,7 +31,12 @@ import { applyFilter, byRecency, parseSince, type ReachCheck } from '../domain/f
 import { scanFosterable } from '../ops/foster.js';
 import { partitionByStore } from '../ops/active.js';
 import { deferredSweepGap, restartPlan, runSweep } from '../ops/sweep.js';
-import { changedByPhases, pendingPhaseWork, runSweepPhases } from '../extensions.js';
+import {
+  changedByPhases,
+  pendingPhaseWork,
+  runSweepPhases,
+  sweepPhaseInteractiveOptions,
+} from '../extensions.js';
 import { applyLabel } from '../ops/label.js';
 import {
   aborted,
@@ -819,6 +824,10 @@ export async function sweepFlow(
   const spin = ui.spinner();
   spin.start('Reading every account on disk');
   const plan = runSweep({ store, ledger, target: current, dryRun: true });
+  // The menu has no command line to parse, so the options each phase gets are
+  // the ones phases declared for it; the same set on the dry run and the real
+  // one, so the plan shown is the plan run.
+  const phaseOptions = sweepPhaseInteractiveOptions({ store, ledger, target: current });
   // A plugin's sweep phases run here as they do under `homecoming sweep`: on
   // the dry run for the plan, and again after the writes. Without this the
   // menu's sweep silently did less than the command's.
@@ -828,7 +837,7 @@ export async function sweepFlow(
     target: current,
     dryRun: true,
     report: plan,
-    options: {},
+    options: phaseOptions,
   });
   spin.stop('Read.');
   const phasePlan = phaseLines(planPhases);
@@ -935,7 +944,7 @@ export async function sweepFlow(
       target: current,
       dryRun: false,
       report,
-      options: {},
+      options: phaseOptions,
     });
     for (const phase of phases) {
       if (phase.error) ui.log.error(`${phase.name}: ${phase.error}`);

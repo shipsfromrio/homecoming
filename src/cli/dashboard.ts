@@ -37,6 +37,10 @@ export function buildDashboard(
       ? { identityName: row.identity.email ?? row.identity.name }
       : {}),
     isCurrent: row.isCurrent,
+    // What a plugin's account decorator added. Absent without one, so the
+    // screen is exactly what it was before decorators existed.
+    ...(row.decoration?.marker ? { marker: row.decoration.marker } : {}),
+    ...(row.decoration?.meta?.length ? { meta: row.decoration.meta } : {}),
     sessions: row.sessions,
     copies: row.copies,
   }));

@@ -34,6 +34,26 @@ describe('README: Extending it', () => {
     );
   });
 
+  /**
+   * The table is the only place a plugin author learns what each field does,
+   * so a field added to `HomecomingPlugin` without a row is an undocumented
+   * extension point. Read from the interface itself, not from a list kept here,
+   * so a new field cannot be forgotten in both places at once.
+   */
+  it('has a row for every field of HomecomingPlugin, and none for a field it lacks', () => {
+    const source = read('src/plugin.ts');
+    const body = /export interface HomecomingPlugin \{([\s\S]*?)\n\}/.exec(source)?.[1] ?? '';
+    const fields = [...body.matchAll(/^ {2}(\w+)\??[(:]/gm)].map((match) => match[1]!);
+    expect(fields).toContain('name');
+    expect(fields.length).toBeGreaterThan(10);
+
+    const rows = [...extending.matchAll(/^\| `(\w+)[`(]/gm)].map((match) => match[1]!);
+    for (const field of fields.filter((field) => field !== 'name')) {
+      expect(rows, `README row for \`${field}\``).toContain(field);
+    }
+    for (const row of rows) expect(fields, `plugin field for README row \`${row}\``).toContain(row);
+  });
+
   it('names a tarball the release workflow actually packs and attaches', () => {
     expect(release).toMatch(/run: npm pack\b/);
     expect(release).toMatch(/gh release create[\s\S]*homecoming-\*\.tgz/);

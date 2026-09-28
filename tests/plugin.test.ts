@@ -1,22 +1,40 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { definePlugin, usePlugin } from '../src/plugin.js';
 import { runCli } from '../src/cli/index.js';
-import { runDoctorChecks, runSweepPhases, listMenuItems } from '../src/extensions.js';
 import { projectSlot } from '../src/ledger/extensions.js';
 import { Ledger } from '../src/ledger/log.js';
 import { findStopped } from '../src/engine/revive.js';
-import { knownStores } from '../src/engine/stores.js';
 import { configDirCandidates } from '../src/store/configDirs.js';
-import { refuseGuarded } from '../src/store/appPrefs.js';
 import { labelsOf } from '../src/cli/names.js';
 import { menuCommands } from '../src/tui/slash.js';
 import type { DiscoveredSession } from '../src/domain/types.js';
 import type { SweepReport } from '../src/ops/sweep.js';
 import type * as Safety from '../src/engine/safety.js';
 import { scanAccount } from '../src/store/scanner.js';
+import { candidateStoreRoots } from '../src/domain/paths.js';
+import { knownStores, resolveStoreArg } from '../src/engine/stores.js';
+import { statsDimensionNames, usageEventsInFile } from '../src/engine/stats.js';
+import { listAgentTools } from '../src/agentTools.js';
+import {
+  doctorTopLevelJson,
+  listAccountMenuItems,
+  listMenuItems,
+  runDoctorChecks,
+  runSweepPhases,
+  sweepPhaseInteractiveOptions,
+} from '../src/extensions.js';
+import { runImportUndo } from '../src/ops/importUndo.js';
+import { refuseGuarded } from '../src/store/appPrefs.js';
+import type { AccountOverview } from '../src/store/accounts.js';
+import { identityOf } from '../src/store/identity.js';
+import { decorateAccount } from '../src/cli/accountDecorators.js';
+import { applyCommandExtenders } from '../src/cli/commandExtenders.js';
+import { FOSTER_NIGHT, themeColor } from '../src/tui/theme.js';
+import { updateRepo } from '../src/update.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
 // `homecoming sweep --yes` asks whether Claude Desktop is running before it
@@ -338,5 +356,211 @@ describe('runCli and a plugin that fails to register', () => {
     } finally {
       process.exitCode = before;
     }
+  });
+});
+
+/**
+ * The points added after 1.0.0, one plugin carrying every one of them. Each is
+ * asked the way the core asks it, and asked again after unregistering, when it
+ * must be gone. The command-level wiring (whoami, stats --by, doctor --json,
+ * stores, return, label) is driven end to end in `tests/pluginCli.test.ts`.
+ */
+describe('the extension points a plugin can fill beyond commands and state', () => {
+  const account = NEW_ACCOUNT.accountUuid;
+  const candidate = makeStore();
+  const resolved = makeStore();
+  const asked: string[] = [];
+  const seen: string[] = [];
+
+  const wide = definePlugin({
+    name: 'wide',
+    storeRootCandidates: [() => [{ root: candidate.root, priority: 1 }]],
+    storeArgResolvers: [(arg) => (arg === 'by-resolver' ? resolved : undefined)],
+    identityReaders: [(_store, uuid) => (uuid === account ? { name: 'Someone' } : undefined)],
+    identitySources: [
+      (uuid) => (uuid === account ? { email: 'someone@example.com', seenAt: 1 } : undefined),
+    ],
+    identityObservers: [{ name: 'wide', onIdentitySeen: (uuid) => void seen.push(uuid) }],
+    accountDecorators: [() => ({ marker: '+', meta: ['example'] })],
+    accountMenuItems: [
+      { value: 'wide-action', label: 'Wide action', run: () => Promise.resolve() },
+    ],
+    commandExtenders: [
+      { command: 'greet', before: () => void asked.push('extender') },
+      { command: 'label', options: [{ flags: '--wide-flag', description: 'an example option' }] },
+    ],
+    nextStepHints: [{ command: 'greet', text: () => 'wide hint' }],
+    statsDimensions: [{ name: 'wide', keyOf: () => 'all' }],
+    statsCounters: [{ name: 'wide', count: () => 1 }],
+    importUndoProviders: [
+      {
+        name: 'wide',
+        select: () => [{ id: 'one', line: 'one import' }],
+        undo: (id) => ({ ok: true, line: `undid ${id}` }),
+      },
+    ],
+    sweepPhases: [{ name: 'wide', interactiveOptions: { wide: true }, run: () => undefined }],
+    doctorChecks: [{ name: 'wide', run: () => [], json: () => ({ wideKey: 1 }) }],
+    updateChannel: { repo: 'example-owner/example-repo' },
+    themeSlots: [{ name: 'wide', night: '#112233', day: '#445566' }],
+    agentTools: [
+      {
+        name: 'wide',
+        description: 'an example tool',
+        inputSchema: { type: 'object' },
+        run: () => Promise.resolve(null),
+      },
+    ],
+  });
+
+  /** `label --help` on a tiny program, once the registered extenders are fitted. */
+  function extendedLabelHelp(): string {
+    const program = new Command();
+    program.command('greet').action(() => undefined);
+    const label = program.command('label').action(() => undefined);
+    const undo = applyCommandExtenders(
+      program,
+      () => ({ store, ledger: ledger() }),
+      () => {},
+    );
+    try {
+      return label.helpInformation();
+    } finally {
+      undo();
+    }
+  }
+
+  /** A tiny program with one command, for the extenders and hints to fit onto. */
+  async function greet(): Promise<string[]> {
+    const program = new Command();
+    program.exitOverride();
+    program.command('greet').action(() => void asked.push('greet'));
+    program.command('label').action(() => undefined);
+    const printed: string[] = [];
+    const log = vi
+      .spyOn(console, 'log')
+      .mockImplementation((line: unknown) => void printed.push(String(line)));
+    const undo = applyCommandExtenders(
+      program,
+      () => ({ store, ledger: ledger() }),
+      () => {},
+    );
+    try {
+      await program.parseAsync(['greet'], { from: 'user' });
+    } finally {
+      undo();
+      log.mockRestore();
+    }
+    return printed;
+  }
+
+  /** Every point asked once, in one place, so registered and unregistered compare. */
+  async function consult() {
+    asked.length = 0;
+    seen.length = 0;
+    const signedIn = makeStore();
+    writeFileSync(signedIn.configFile, JSON.stringify({ lastKnownAccountUuid: account }), 'utf8');
+    const transcript = path.join(
+      mkdtempSync(path.join(tmpdir(), 'homecoming-plugin-t-')),
+      't.jsonl',
+    );
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: new Date(1_800_000_000_000).toISOString(),
+        message: { model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } },
+      }),
+      'utf8',
+    );
+    const printed = await greet();
+    let storeArg: string | undefined;
+    try {
+      storeArg = resolveStoreArg('by-resolver', () => [], {}).root;
+    } catch {
+      storeArg = undefined;
+    }
+    return {
+      defaultStores: candidateStoreRoots({}),
+      storeArg,
+      identity: identityOf(signedIn, account, ledger()),
+      observed: [...seen],
+      decoration: decorateAccount({} as AccountOverview, { store, ledger: ledger() }),
+      accountMenu: listAccountMenuItems().map((item) => item.value),
+      greet: [...asked],
+      hint: printed.some((line) => line.includes('wide hint')),
+      dimensions: statsDimensionNames(),
+      counters: usageEventsInFile(transcript, 0)[0]?.counters,
+      imports: runImportUndo({ store, ledger: ledger(), dryRun: true }).lines,
+      interactive: sweepPhaseInteractiveOptions({ store, ledger: ledger(), target: NEW_ACCOUNT }),
+      doctorJson: doctorTopLevelJson({ store, ledger: ledger() }, []),
+      extendedHelp: extendedLabelHelp(),
+      updateRepo: updateRepo({}),
+      themeSlot: themeColor(FOSTER_NIGHT, 'wide'),
+      agentTools: listAgentTools().map((tool) => tool.name),
+    };
+  }
+
+  it('consults every one of them while registered', async () => {
+    dispose = usePlugin(wide);
+    const got = await consult();
+
+    expect(got.defaultStores[0]).toBe(candidate.root);
+    expect(got.storeArg).toBe(resolved.root);
+    expect(got.identity).toEqual({ email: 'someone@example.com', name: 'Someone' });
+    expect(got.observed).toEqual([account]);
+    expect(got.decoration).toMatchObject({ marker: '+', meta: ['example'] });
+    expect(got.accountMenu).toContain('wide-action');
+    expect(got.greet).toEqual(['extender', 'greet']);
+    expect(got.hint).toBe(true);
+    expect(got.dimensions).toEqual(['model', 'week', 'wide']);
+    expect(got.counters).toEqual({ wide: 1 });
+    expect(got.imports).toEqual(['undid one']);
+    expect(got.interactive).toEqual({ wide: true });
+    expect(got.doctorJson).toEqual({ wideKey: 1 });
+    expect(got.extendedHelp).toContain('--wide-flag');
+    expect(got.updateRepo).toBe('example-owner/example-repo');
+    expect(got.themeSlot).toBe('#112233');
+    expect(got.agentTools).toEqual(['wide']);
+  });
+
+  it('lets go of every one of them once unregistered', async () => {
+    usePlugin(wide)();
+    const got = await consult();
+
+    expect(got.defaultStores).not.toContain(candidate.root);
+    expect(got.storeArg).toBeUndefined();
+    expect(got.identity).toBeUndefined();
+    expect(got.observed).toEqual([]);
+    expect(got.decoration).toBeUndefined();
+    expect(got.accountMenu).toEqual([]);
+    expect(got.greet).toEqual(['greet']);
+    expect(got.hint).toBe(false);
+    expect(got.dimensions).toEqual(['model', 'week']);
+    expect(got.counters).toBeUndefined();
+    expect(got.imports).toEqual([]);
+    expect(got.interactive).toEqual({});
+    expect(got.doctorJson).toEqual({});
+    expect(got.extendedHelp).not.toContain('--wide-flag');
+    expect(got.updateRepo).not.toBe('example-owner/example-repo');
+    expect(got.themeSlot).toBeUndefined();
+    expect(got.agentTools).toEqual([]);
+  });
+
+  it('refuses a second update channel, and takes back what that plugin registered first', () => {
+    dispose = usePlugin(definePlugin({ name: 'first', updateChannel: { repo: 'first/channel' } }));
+    const second = definePlugin({
+      name: 'second',
+      statsDimensions: [{ name: 'second', keyOf: () => 'x' }],
+      accountMenuItems: [{ value: 'second', label: 'x', run: () => Promise.resolve() }],
+      identitySources: [() => ({ email: 'second@example.com', seenAt: 1 })],
+      updateChannel: { repo: 'second/channel' },
+    });
+
+    expect(() => usePlugin(second)).toThrow(/plugin "second" could not be registered/);
+    expect(statsDimensionNames()).toEqual(['model', 'week']);
+    expect(listAccountMenuItems()).toEqual([]);
+    expect(identityOf(makeStore(), account, ledger())).toBeUndefined();
+    expect(updateRepo({})).toBe('first/channel');
   });
 });

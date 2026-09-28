@@ -9,8 +9,8 @@ import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { createLiveUi } from '../tui/run.js';
-import { asChoices, menuCommands } from '../tui/slash.js';
-import { listMenuItems } from '../extensions.js';
+import { accountMenuItemFor, asChoices, menuCommands } from '../tui/slash.js';
+import { listMenuItems, type MenuContext, type MenuOutcome } from '../extensions.js';
 import { THEMES, type ThemeName } from '../tui/theme.js';
 import { isCancel, type Ui } from '../tui/ui.js';
 import { buildDashboard } from './dashboard.js';
@@ -28,14 +28,7 @@ import { showAccountDetails, showAccounts, showStatus } from './screens.js';
 import { BACK_OPTION } from './prompts.js';
 import { describeRef, labelsOf, nameEverything } from './names.js';
 
-type Action = (ctx: Session, accountUuid?: string) => Promise<void>;
-
-interface Session {
-  ui: Ui;
-  store: StoreLayout;
-  ledger: Ledger;
-  target: AccountRef;
-}
+type Action = (ctx: MenuContext, accountUuid?: string) => Promise<void | MenuOutcome>;
 
 /**
  * The interactive entry: alt-screen TUI, or a scripted Ui in tests.
@@ -58,7 +51,7 @@ export async function runInteractive(
 }
 
 async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Promise<void> {
-  const store = initialStore;
+  let store = initialStore;
   ui.intro(`${pc.bgCyan(pc.black(' homecoming '))} ${pc.dim(VERSION)}`);
 
   const update = checkForUpdate();
@@ -70,7 +63,7 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
     ui.outro('Nothing to do.');
     return;
   }
-  const target = signedIn;
+  let target = signedIn;
   let rows: AccountOverview[] = [];
 
   showEnvironment(ui, store, ledger, target);
@@ -139,12 +132,63 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
     const colon = choice.indexOf(':');
     const verb = colon === -1 ? choice : choice.slice(0, colon);
     const accountUuid = colon === -1 ? undefined : choice.slice(colon + 1);
-    const action =
+    const accountItem = accountUuid ? accountMenuItemFor(verb) : undefined;
+    const action: Action | undefined =
       actions[verb] ??
-      listMenuItems().find((item) => item.value === verb && !(item.value in actions))?.run;
+      listMenuItems().find((item) => item.value === verb && !(item.value in actions))?.run ??
+      (accountItem && accountUuid
+        ? (ctx: MenuContext) => accountItem.run(ctx, accountUuid)
+        : undefined);
     if (!action) continue;
-    await action({ ui, store, ledger, target }, accountUuid);
+
+    // An item may move the menu to another store or account, by what it
+    // returns or through `switchStore`; the next screen, and every flow after
+    // it, then acts there instead of on the store the menu opened with.
+    let requested: MenuOutcome | undefined;
+    const outcome = await action(
+      {
+        ui,
+        store,
+        ledger,
+        target,
+        switchStore: (next, nextTarget) => {
+          requested = nextTarget ? { store: next, target: nextTarget } : { store: next };
+        },
+      },
+      accountUuid,
+    );
+    const next = outcome && (outcome.store || outcome.target) ? outcome : requested;
+    if (!next) continue;
+    const moved = retarget(ui, { store, target }, next);
+    if (!moved) continue;
+    store = moved.store;
+    target = moved.target;
+    nameEverything(store);
+    showEnvironment(ui, store, ledger, target);
   }
+}
+
+/**
+ * Where the menu acts after an item asked to move. A store with no target
+ * means the account signed in to that store; when none can be determined the
+ * menu stays where it was and says so, rather than acting on an account that
+ * belongs to the previous store.
+ */
+function retarget(
+  ui: Ui,
+  current: { store: StoreLayout; target: AccountRef },
+  next: MenuOutcome,
+): { store: StoreLayout; target: AccountRef } | undefined {
+  const store = next.store ?? current.store;
+  const target =
+    next.target ?? (next.store ? currentAccount(store, listAccountDirs(store)) : current.target);
+  if (!target) {
+    ui.log.error(
+      `Could not determine which account is signed in to ${store.root}; staying on ${current.store.root}.`,
+    );
+    return undefined;
+  }
+  return { store, target };
 }
 
 async function themeFlow(ui: Ui): Promise<void> {

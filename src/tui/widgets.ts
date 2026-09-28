@@ -1,5 +1,5 @@
 import type { ColorLevel, Theme } from './theme.js';
-import { BOLD, RESET, bgCode, fgCode } from './theme.js';
+import { BOLD, RESET, bgCode, fgCode, themeColor } from './theme.js';
 
 // CSI / OSC. Written as controls because that is what a TTY emits.
 // eslint-disable-next-line no-control-regex
@@ -96,4 +96,26 @@ export function splitLeftRight(left: string, right: string, cols: number): strin
   const rightW = visibleWidth(right);
   const leftW = Math.max(0, cols - rightW - gap);
   return padEndVisible(truncateVisible(left, leftW), leftW) + ' '.repeat(gap) + right;
+}
+
+/**
+ * A horizontal bar exactly `width` cells wide, `fraction` of it filled. The
+ * filled part wears `slot` (a core or registered theme slot) and falls back to
+ * the accent; the rest wears the border colour. A fraction outside 0..1, or not
+ * a number, is clamped, so the bar never changes the width of its line.
+ */
+export function meter(
+  level: ColorLevel,
+  theme: Theme,
+  fraction: number,
+  width: number,
+  slot?: string,
+): string {
+  const cells = Math.max(0, Math.floor(width));
+  const share = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
+  const filled = Math.round(share * cells);
+  const colour = (slot ? themeColor(theme, slot) : undefined) ?? theme.accent;
+  const on = filled > 0 ? paintFg(level, colour, '█'.repeat(filled)) : '';
+  const off = cells - filled > 0 ? paintFg(level, theme.border, '░'.repeat(cells - filled)) : '';
+  return on + off;
 }
