@@ -50,6 +50,15 @@ export interface CommandExtenderContext {
 export interface CommandExtender {
   command: string;
   options?: readonly { flags: string; description: string; defaultValue?: unknown }[];
+  /**
+   * The command's `--help` as the plugin changes what it does: a `summary`
+   * (the one line in the command list) and a `description` (the text of its
+   * own help), each replacing the core's while the extender is applied. A
+   * plugin that widens a command says so where the user reads what it does,
+   * and the core's text is left as it is for the build without the plugin.
+   * Two extenders replacing the same one are refused.
+   */
+  help?: { summary?: string; description?: string };
   before?(context: CommandExtenderContext): boolean | void | Promise<boolean | void>;
   after?(context: CommandExtenderContext): void | Promise<void>;
 }
@@ -161,8 +170,23 @@ export function applyCommandExtenders(
   };
 
   try {
+    const helpOwners = new Set<string>();
     for (const extender of extenders) {
       const command = targets.get(extender.command)!;
+      for (const field of ['summary', 'description'] as const) {
+        const text = extender.help?.[field];
+        if (text === undefined) continue;
+        const key = `${field}:${extender.command}`;
+        if (helpOwners.has(key)) {
+          throw new Error(`cannot extend "${extender.command}": its ${field} is replaced twice`);
+        }
+        helpOwners.add(key);
+        const previous = command[field]();
+        command[field](text);
+        undo.push(() => {
+          command[field](previous);
+        });
+      }
       for (const spec of extender.options ?? []) {
         const before = command.options.length;
         if (spec.defaultValue === undefined) command.option(spec.flags, spec.description);

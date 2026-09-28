@@ -157,6 +157,38 @@ describe('command extenders', () => {
     expect(label.helpInformation()).not.toContain('--forget');
   });
 
+  it("replace the command's summary and description while applied, and the restore puts the core's back", () => {
+    const root = program();
+    const label = root.commands.find((c) => c.name() === 'label')!;
+    label.summary('core summary').description('core description');
+    undo.push(
+      registerCommandExtender({
+        command: 'label',
+        help: { summary: 'plugin summary', description: 'plugin description' },
+      }),
+    );
+    const restore = apply(root);
+
+    expect(label.summary()).toBe('plugin summary');
+    expect(label.helpInformation()).toContain('plugin description');
+    expect(label.helpInformation()).not.toContain('core description');
+
+    restore();
+    expect(label.summary()).toBe('core summary');
+    expect(label.description()).toBe('core description');
+  });
+
+  it('refuse two extenders replacing the same help text, leaving the core text in place', () => {
+    const root = program();
+    const label = root.commands.find((c) => c.name() === 'label')!;
+    label.description('core description');
+    undo.push(registerCommandExtender({ command: 'label', help: { description: 'one' } }));
+    undo.push(registerCommandExtender({ command: 'label', help: { description: 'two' } }));
+
+    expect(() => apply(root)).toThrow(/description is replaced twice/);
+    expect(label.description()).toBe('core description');
+  });
+
   it('leave the command untouched when none is registered', async () => {
     const root = program();
     apply(root);
