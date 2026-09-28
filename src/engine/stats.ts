@@ -17,17 +17,22 @@ export interface UsageEvent {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  /** What each registered stats counter counted on this record; absent without one. */
+  counters?: Record<string, number>;
 }
 
 export interface StatsOptions {
   /** Only events at or after this instant. */
   since: number;
-  by: 'model' | 'week';
+  /** `model`, `week`, or the name of a registered stats dimension. */
+  by: string;
 }
 
 /** One conversation to fold into the report. */
 export interface StatsConversation {
   cliSessionId: string;
+  /** The account the conversation belongs to, when whoever listed it knows. */
+  accountUuid?: string;
 }
 
 /** The seams tests replace: which conversations exist, and what their transcripts say. */
@@ -41,6 +46,8 @@ export interface StatsBucketKey {
   model?: string;
   /** The Monday (UTC) the week starts, as `YYYY-MM-DD`. */
   week?: string;
+  /** For a registered dimension: its name and the key it gave, `(unknown)` for none. */
+  extra?: Record<string, string>;
 }
 
 export interface StatsBucket {
@@ -50,6 +57,8 @@ export interface StatsBucket {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  /** Registered counters, summed over the bucket's events; absent without one. */
+  counters?: Record<string, number>;
 }
 
 export interface StatsReport {
@@ -59,116 +68,213 @@ export interface StatsReport {
   totals: Omit<StatsBucket, 'key'>;
 }
 
-interface Cell {
-  model: string;
-  week: string;
+// ---------------------------------------------------------------------------
+// Extension points: further dimensions to group by, further things to count.
+// ---------------------------------------------------------------------------
+
+/** Removes what a `register*` call added. */
+type Unregister = () => void;
+
+/**
+ * A further way to group `stats`, beside `model` and `week`. `keyOf` names the
+ * bucket an event falls in; undefined puts it in the `(unknown)` bucket rather
+ * than dropping it, so the totals never depend on the dimension chosen.
+ */
+export interface StatsDimension {
+  name: string;
+  /** How the report headline names the dimension; the name when absent. */
+  label?: string;
+  keyOf(conversation: StatsConversation, event: UsageEvent): string | undefined;
+}
+
+/**
+ * Something more to count on each assistant record that carries usage, beside
+ * the token fields. `count` sees the parsed record and returns how many of the
+ * thing it holds; anything but a finite number counts as zero, and a counter
+ * that throws counts zero for that record.
+ */
+export interface StatsCounter {
+  name: string;
+  count(record: Readonly<Record<string, unknown>>): number;
+}
+
+const CORE_DIMENSIONS = ['model', 'week'] as const;
+
+/** The bucket a dimension gives nothing for. */
+export const UNKNOWN_STATS_KEY = '(unknown)';
+
+const dimensions: StatsDimension[] = [];
+const counters: StatsCounter[] = [];
+
+function addTo<T>(list: T[], item: T): Unregister {
+  list.push(item);
+  return () => {
+    const at = list.indexOf(item);
+    if (at >= 0) list.splice(at, 1);
+  };
+}
+
+/** Adds a dimension `stats --by` can group on. A name already taken is refused. */
+export function registerStatsDimension(dimension: StatsDimension): Unregister {
+  if (statsDimensionNames().includes(dimension.name)) {
+    throw new Error(`stats dimension "${dimension.name}" is already registered`);
+  }
+  return addTo(dimensions, dimension);
+}
+
+/** Adds a counter summed into every bucket and the totals. A name already taken is refused. */
+export function registerStatsCounter(counter: StatsCounter): Unregister {
+  if (counters.some((existing) => existing.name === counter.name)) {
+    throw new Error(`stats counter "${counter.name}" is already registered`);
+  }
+  return addTo(counters, counter);
+}
+
+/** Every dimension `stats --by` accepts: the core's two, then the registered ones. */
+export function statsDimensionNames(): string[] {
+  return [...CORE_DIMENSIONS, ...dimensions.map((dimension) => dimension.name)];
+}
+
+/** What the report headline calls a dimension. */
+export function statsDimensionLabel(by: string): string {
+  return dimensions.find((dimension) => dimension.name === by)?.label ?? by;
+}
+
+/** The name one bucket goes by in a report grouped by `by`. */
+export function statsBucketName(by: string, bucket: StatsBucket): string {
+  if (by === 'model') return bucket.key.model ?? 'unknown';
+  if (by === 'week') return bucket.key.week ?? '?';
+  return bucket.key.extra?.[by] ?? UNKNOWN_STATS_KEY;
+}
+
+/** Each registered counter's count on one record, or undefined with none registered. */
+function countersOf(record: Readonly<Record<string, unknown>>): Record<string, number> | undefined {
+  if (counters.length === 0) return undefined;
+  const out: Record<string, number> = {};
+  for (const counter of counters) {
+    let value = 0;
+    try {
+      const counted = counter.count(record);
+      value = typeof counted === 'number' && Number.isFinite(counted) ? counted : 0;
+    } catch {
+      value = 0;
+    }
+    out[counter.name] = value;
+  }
+  return out;
+}
+
+interface Tally {
+  key: StatsBucketKey;
   sessions: Set<string>;
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  counters?: Record<string, number>;
 }
 
-function cellFor(cells: Map<string, Cell>, model: string, week: string): Cell {
-  const key = JSON.stringify([model, week]);
-  let cell = cells.get(key);
-  if (!cell) {
-    cell = {
-      model,
-      week,
-      sessions: new Set(),
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationTokens: 0,
-      cacheReadTokens: 0,
-    };
-    cells.set(key, cell);
-  }
-  return cell;
-}
-
-export function computeStats(options: StatsOptions, deps: StatsDeps): StatsReport {
-  const cells = new Map<string, Cell>();
-  const totalSessions = new Set<string>();
-  const totals = {
+function emptyTally(key: StatsBucketKey): Tally {
+  return {
+    key,
+    sessions: new Set(),
     inputTokens: 0,
     outputTokens: 0,
     cacheCreationTokens: 0,
     cacheReadTokens: 0,
   };
+}
+
+/** Adds one event to a tally, counters included, exactly once. */
+function add(tally: Tally, sessionId: string, event: UsageEvent): void {
+  tally.sessions.add(sessionId);
+  tally.inputTokens += event.inputTokens;
+  tally.outputTokens += event.outputTokens;
+  tally.cacheCreationTokens += event.cacheCreationTokens;
+  tally.cacheReadTokens += event.cacheReadTokens;
+  if (event.counters) {
+    tally.counters ??= {};
+    for (const [name, value] of Object.entries(event.counters)) {
+      tally.counters[name] = (tally.counters[name] ?? 0) + value;
+    }
+  }
+}
+
+function settle(tally: Tally): Omit<StatsBucket, 'key'> {
+  return {
+    sessions: tally.sessions.size,
+    inputTokens: tally.inputTokens,
+    outputTokens: tally.outputTokens,
+    cacheCreationTokens: tally.cacheCreationTokens,
+    cacheReadTokens: tally.cacheReadTokens,
+    ...(tally.counters ? { counters: tally.counters } : {}),
+  };
+}
+
+/** The bucket one event falls in, as a map key and as the report's key. */
+function bucketOf(
+  by: string,
+  dimension: StatsDimension | undefined,
+  conversation: StatsConversation,
+  event: UsageEvent,
+): { id: string; key: StatsBucketKey } {
+  if (by === 'model') return { id: event.model, key: { model: event.model } };
+  if (by === 'week') {
+    const week = weekKey(event.at);
+    return { id: week, key: { week } };
+  }
+  let found: string | undefined;
+  try {
+    found = dimension?.keyOf(conversation, event);
+  } catch {
+    found = undefined;
+  }
+  const value = typeof found === 'string' && found !== '' ? found : UNKNOWN_STATS_KEY;
+  return { id: value, key: { extra: { [by]: value } } };
+}
+
+export function computeStats(options: StatsOptions, deps: StatsDeps): StatsReport {
+  const dimension = dimensions.find((candidate) => candidate.name === options.by);
+  if (!dimension && !(CORE_DIMENSIONS as readonly string[]).includes(options.by)) {
+    throw new Error(
+      `Cannot group stats by "${options.by}". Choose one of: ${statsDimensionNames().join(', ')}.`,
+    );
+  }
+
+  const buckets = new Map<string, Tally>();
+  const totals = emptyTally({});
 
   for (const conversation of deps.conversations()) {
     const usage = deps.eventsOf(conversation.cliSessionId, options.since);
     if (usage.length === 0) continue;
-    totalSessions.add(conversation.cliSessionId);
+    totals.sessions.add(conversation.cliSessionId);
 
     for (const event of usage) {
-      const week = weekKey(event.at);
-      const cell = cellFor(cells, event.model, week);
-      cell.sessions.add(conversation.cliSessionId);
-      cell.inputTokens += event.inputTokens;
-      cell.outputTokens += event.outputTokens;
-      cell.cacheCreationTokens += event.cacheCreationTokens;
-      cell.cacheReadTokens += event.cacheReadTokens;
-      totals.inputTokens += event.inputTokens;
-      totals.outputTokens += event.outputTokens;
-      totals.cacheCreationTokens += event.cacheCreationTokens;
-      totals.cacheReadTokens += event.cacheReadTokens;
+      const { id, key } = bucketOf(options.by, dimension, conversation, event);
+      let bucket = buckets.get(id);
+      if (!bucket) {
+        bucket = emptyTally(key);
+        buckets.set(id, bucket);
+      }
+      add(bucket, conversation.cliSessionId, event);
+      add(totals, conversation.cliSessionId, event);
     }
   }
+
+  const rows: StatsBucket[] = [...buckets.values()].map((tally) => ({
+    key: tally.key,
+    ...settle(tally),
+  }));
+  if (options.by === 'week')
+    rows.sort((a, b) => (a.key.week ?? '').localeCompare(b.key.week ?? ''));
+  else rows.sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens));
 
   return {
     since: options.since,
     by: options.by,
-    buckets: collapse(cells, options.by),
-    totals: { sessions: totalSessions.size, ...totals },
+    buckets: rows,
+    totals: settle(totals),
   };
-}
-
-/** Merges the fine-grained (model, week) cells down to the one dimension asked for. */
-function collapse(cells: Map<string, Cell>, by: StatsOptions['by']): StatsBucket[] {
-  const merged = new Map<
-    string,
-    { key: StatsBucketKey; sessions: Set<string> } & Omit<StatsBucket, 'key' | 'sessions'>
-  >();
-
-  for (const cell of cells.values()) {
-    const key: StatsBucketKey = by === 'model' ? { model: cell.model } : { week: cell.week };
-    const mapKey = by === 'model' ? cell.model : cell.week;
-
-    let bucket = merged.get(mapKey);
-    if (!bucket) {
-      bucket = {
-        key,
-        sessions: new Set(),
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheCreationTokens: 0,
-        cacheReadTokens: 0,
-      };
-      merged.set(mapKey, bucket);
-    }
-    for (const id of cell.sessions) bucket.sessions.add(id);
-    bucket.inputTokens += cell.inputTokens;
-    bucket.outputTokens += cell.outputTokens;
-    bucket.cacheCreationTokens += cell.cacheCreationTokens;
-    bucket.cacheReadTokens += cell.cacheReadTokens;
-  }
-
-  const buckets = [...merged.values()].map((bucket) => ({
-    key: bucket.key,
-    sessions: bucket.sessions.size,
-    inputTokens: bucket.inputTokens,
-    outputTokens: bucket.outputTokens,
-    cacheCreationTokens: bucket.cacheCreationTokens,
-    cacheReadTokens: bucket.cacheReadTokens,
-  }));
-
-  if (by === 'week') buckets.sort((a, b) => (a.key.week ?? '').localeCompare(b.key.week ?? ''));
-  else {
-    buckets.sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens));
-  }
-  return buckets;
 }
 
 /** The Monday (UTC) a moment's week starts on, as `YYYY-MM-DD` — stable across timezones. */
@@ -249,6 +355,7 @@ function eventOfLine(line: string): UsageEvent | undefined {
 
   const usage = message?.usage as Record<string, unknown> | undefined;
   if (!usage || typeof usage !== 'object') return undefined;
+  const counted = countersOf(record);
   return {
     at,
     model,
@@ -256,6 +363,7 @@ function eventOfLine(line: string): UsageEvent | undefined {
     outputTokens: numberField(usage.output_tokens),
     cacheCreationTokens: numberField(usage.cache_creation_input_tokens),
     cacheReadTokens: numberField(usage.cache_read_input_tokens),
+    ...(counted ? { counters: counted } : {}),
   };
 }
 
