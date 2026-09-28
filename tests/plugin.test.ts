@@ -20,10 +20,12 @@ import { knownStores, resolveStoreArg } from '../src/engine/stores.js';
 import { statsDimensionNames, usageEventsInFile } from '../src/engine/stats.js';
 import { listAgentTools } from '../src/agentTools.js';
 import {
+  doctorTopLevelJson,
   listAccountMenuItems,
   listMenuItems,
   runDoctorChecks,
   runSweepPhases,
+  sweepPhaseInteractiveOptions,
 } from '../src/extensions.js';
 import { runImportUndo } from '../src/ops/importUndo.js';
 import { refuseGuarded } from '../src/store/appPrefs.js';
@@ -383,7 +385,10 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     accountMenuItems: [
       { value: 'wide-action', label: 'Wide action', run: () => Promise.resolve() },
     ],
-    commandExtenders: [{ command: 'greet', before: () => void asked.push('extender') }],
+    commandExtenders: [
+      { command: 'greet', before: () => void asked.push('extender') },
+      { command: 'label', options: [{ flags: '--wide-flag', description: 'an example option' }] },
+    ],
     nextStepHints: [{ command: 'greet', text: () => 'wide hint' }],
     statsDimensions: [{ name: 'wide', keyOf: () => 'all' }],
     statsCounters: [{ name: 'wide', count: () => 1 }],
@@ -394,6 +399,8 @@ describe('the extension points a plugin can fill beyond commands and state', () 
         undo: (id) => ({ ok: true, line: `undid ${id}` }),
       },
     ],
+    sweepPhases: [{ name: 'wide', interactiveOptions: { wide: true }, run: () => undefined }],
+    doctorChecks: [{ name: 'wide', run: () => [], json: () => ({ wideKey: 1 }) }],
     updateChannel: { repo: 'example-owner/example-repo' },
     themeSlots: [{ name: 'wide', night: '#112233', day: '#445566' }],
     agentTools: [
@@ -406,11 +413,29 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     ],
   });
 
+  /** `label --help` on a tiny program, once the registered extenders are fitted. */
+  function extendedLabelHelp(): string {
+    const program = new Command();
+    program.command('greet').action(() => undefined);
+    const label = program.command('label').action(() => undefined);
+    const undo = applyCommandExtenders(
+      program,
+      () => ({ store, ledger: ledger() }),
+      () => {},
+    );
+    try {
+      return label.helpInformation();
+    } finally {
+      undo();
+    }
+  }
+
   /** A tiny program with one command, for the extenders and hints to fit onto. */
   async function greet(): Promise<string[]> {
     const program = new Command();
     program.exitOverride();
     program.command('greet').action(() => void asked.push('greet'));
+    program.command('label').action(() => undefined);
     const printed: string[] = [];
     const log = vi
       .spyOn(console, 'log')
@@ -467,6 +492,9 @@ describe('the extension points a plugin can fill beyond commands and state', () 
       dimensions: statsDimensionNames(),
       counters: usageEventsInFile(transcript, 0)[0]?.counters,
       imports: runImportUndo({ store, ledger: ledger(), dryRun: true }).lines,
+      interactive: sweepPhaseInteractiveOptions({ store, ledger: ledger(), target: NEW_ACCOUNT }),
+      doctorJson: doctorTopLevelJson({ store, ledger: ledger() }, []),
+      extendedHelp: extendedLabelHelp(),
       updateRepo: updateRepo({}),
       themeSlot: themeColor(FOSTER_NIGHT, 'wide'),
       agentTools: listAgentTools().map((tool) => tool.name),
@@ -488,6 +516,9 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     expect(got.dimensions).toEqual(['model', 'week', 'wide']);
     expect(got.counters).toEqual({ wide: 1 });
     expect(got.imports).toEqual(['undid one']);
+    expect(got.interactive).toEqual({ wide: true });
+    expect(got.doctorJson).toEqual({ wideKey: 1 });
+    expect(got.extendedHelp).toContain('--wide-flag');
     expect(got.updateRepo).toBe('example-owner/example-repo');
     expect(got.themeSlot).toBe('#112233');
     expect(got.agentTools).toEqual(['wide']);
@@ -508,6 +539,9 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     expect(got.dimensions).toEqual(['model', 'week']);
     expect(got.counters).toBeUndefined();
     expect(got.imports).toEqual([]);
+    expect(got.interactive).toEqual({});
+    expect(got.doctorJson).toEqual({});
+    expect(got.extendedHelp).not.toContain('--wide-flag');
     expect(got.updateRepo).not.toBe('example-owner/example-repo');
     expect(got.themeSlot).toBeUndefined();
     expect(got.agentTools).toEqual([]);
