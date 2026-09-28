@@ -655,7 +655,7 @@ function storeLine(
   return `${marker} ${label} ${pc.dim(`(${storeState(known)}) last seen as ${lastSeenAs(known, labels)}`)}`;
 }
 
-/** Shared with `profile list`, which is this command under another name. */
+/** Prints every installation the ledger and the extensions know, with its state. */
 function describeStores(this: Command): void {
   const opts = this.optsWithGlobals<GlobalOptions & { json?: boolean }>();
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
@@ -768,7 +768,7 @@ program
   )
   .option(
     '--no-archive-sync',
-    "leave a copy's archived flag alone instead of matching its source row (on by default)",
+    "leave a copy's archived flag alone instead of matching the most recently active card of the same conversation (on by default)",
   )
   .option(
     '--dates',
