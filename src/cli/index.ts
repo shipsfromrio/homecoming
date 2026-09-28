@@ -3765,14 +3765,7 @@ program
 
     if (!accountUuid) {
       if (json) {
-        return print({
-          accountUuid: null,
-          email: null,
-          name: null,
-          plan: null,
-          remembered: false,
-          seenAt: null,
-        });
+        return print({ accountUuid: null, email: null, name: null });
       }
       console.log('No account is signed in. Open Claude Desktop once first.');
       return;
@@ -3786,8 +3779,9 @@ program
     // Read at rest, never over the network: the app cached its own profile in the
     // web-origin LevelDB, which is page data rather than a credential. Identity
     // readers a plugin registered complete that read, and an identity source
-    // answers for what the cache no longer holds; the core has neither, so
-    // without a plugin `plan` stays null and nothing is `remembered`.
+    // answers for what the cache no longer holds. The core has neither, so
+    // without a plugin the JSON is the same three keys; `remembered` and
+    // `seenAt` appear only when a source answered for what the cache lacked.
     const identity = identityOf(store, accountUuid, ledger);
 
     if (json) {
@@ -3795,15 +3789,12 @@ program
         accountUuid,
         email: identity?.email ?? null,
         name: identity?.name ?? null,
-        plan: identity?.plan ?? null,
-        remembered: identity?.remembered ?? false,
-        seenAt: identity?.seenAt ?? null,
+        ...(identity?.remembered ? { remembered: true, seenAt: identity.seenAt ?? null } : {}),
       });
     }
 
     if (identity?.name) console.log(`name     ${pc.bold(identity.name)}`);
     if (identity?.email) console.log(`email    ${identity.email}`);
-    if (identity?.plan) console.log(`plan     ${identity.plan}`);
     if (identity?.remembered && identity.seenAt !== undefined) {
       console.log(pc.dim(`Not in the app's cache now; last seen ${formatDate(identity.seenAt)}.`));
     }

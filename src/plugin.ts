@@ -1,7 +1,6 @@
 import type { Command } from 'commander';
 import type { StoreLayout } from './domain/types.js';
 import { registerStoreRootCandidates, type StoreRootCandidateSource } from './domain/paths.js';
-import { registerLayoutStorageWrite, type LayoutStorageWrite } from './engine/layout.js';
 import { registerReviveInclusion, type ReviveInclusion } from './engine/revive.js';
 import {
   registerStatsCounter,
@@ -31,14 +30,7 @@ import {
 import { registerLedgerReducer, type LedgerReducer } from './ledger/extensions.js';
 import type { Ledger } from './ledger/log.js';
 import { registerImportUndoProvider, type ImportUndoProvider } from './ops/importUndo.js';
-import {
-  registerAccountPrefCarryAllowlist,
-  registerAppPrefAllowlist,
-  registerAppPrefWriteNotice,
-  type AccountPrefCarryAllowlist,
-  type AppPrefAllowlist,
-  type AppPrefWriteNotice,
-} from './store/appPrefs.js';
+import { registerAppPrefAllowlist, type AppPrefAllowlist } from './store/appPrefs.js';
 import { registerConfigDirProvider, type ConfigDirProvider } from './store/configDirs.js';
 import { registerCredentialProbe, type CredentialProbe } from './store/config.js';
 import {
@@ -112,10 +104,6 @@ export interface PluginContext {
  * - `importUndoProviders`: other things `return` can take back.
  * - `appPrefAllowlists`: guarded preference names this plugin may write. The
  *   core refuses organization policy, compliance and approval preferences.
- * - `appPrefWriteNotices`: a line printed after a preference write.
- * - `accountPrefCarryAllowlists`: per-account preferences `layout` may carry.
- * - `layoutStorageWrites`: further Local Storage entries `layout` writes, in
- *   the same batch and backup as its own.
  * - `credentialProbes`: whether a store's config carries a sign-in token.
  *   Presence only. The core never looks, and a probe must not return the token.
  * - `updateChannel`: where the update check looks and what it suggests running.
@@ -149,9 +137,6 @@ export interface HomecomingPlugin {
   unstartedSources?: UnstartedSource[];
   importUndoProviders?: ImportUndoProvider[];
   appPrefAllowlists?: AppPrefAllowlist[];
-  appPrefWriteNotices?: AppPrefWriteNotice[];
-  accountPrefCarryAllowlists?: AccountPrefCarryAllowlist[];
-  layoutStorageWrites?: LayoutStorageWrite[];
   credentialProbes?: CredentialProbe[];
   updateChannel?: UpdateChannel;
   themeSlots?: ThemeSlot[];
@@ -196,9 +181,6 @@ export function usePlugin(plugin: HomecomingPlugin): Unregister {
     each(plugin.unstartedSources, registerUnstartedSource);
     each(plugin.importUndoProviders, registerImportUndoProvider);
     each(plugin.appPrefAllowlists, registerAppPrefAllowlist);
-    each(plugin.appPrefWriteNotices, registerAppPrefWriteNotice);
-    each(plugin.accountPrefCarryAllowlists, registerAccountPrefCarryAllowlist);
-    each(plugin.layoutStorageWrites, registerLayoutStorageWrite);
     each(plugin.credentialProbes, registerCredentialProbe);
     if (plugin.updateChannel) undo.push(registerUpdateChannel(plugin.updateChannel));
     each(plugin.themeSlots, registerThemeSlot);

@@ -5,8 +5,6 @@ import { restartCommandFromArgv } from '../engine/detach.js';
 import { inspectApp } from '../engine/safety.js';
 import { restartAround } from '../ops/restart.js';
 import {
-  appPrefWriteNotices,
-  isGuardedPref,
   parsePrefValue,
   readAppPrefs,
   refuseGuarded,
@@ -157,18 +155,11 @@ export function registerAppPref(
         to: unknown;
         unset: boolean;
         backup: string;
-        notices?: string[];
       }> = [];
       const writeAll = (): void => {
         for (const item of planned) {
           const { write, backup } = writeAppPref(store, item.name, item.parsed, {
             ...(item.unset ? { unset: true } : {}),
-          });
-          // Registered notices speak after the write has landed, never before:
-          // they describe a change, not a plan.
-          const notices = appPrefWriteNotices(write, {
-            store,
-            guarded: isGuardedPref(write.name),
           });
           written.push({
             name: write.name,
@@ -176,7 +167,6 @@ export function registerAppPref(
             to: write.to,
             unset: Boolean(write.unset),
             backup,
-            ...(notices.length > 0 ? { notices } : {}),
           });
           if (!opts.json) {
             console.log(
@@ -184,7 +174,6 @@ export function registerAppPref(
                 (write.unset ? pc.dim(' (default)') : ''),
             );
             console.log(pc.dim(`  backup: ${backup}`));
-            for (const notice of notices) console.log(pc.yellow(`  ${notice}`));
           }
         }
       };

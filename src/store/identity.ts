@@ -12,16 +12,12 @@ type Unregister = () => void;
 /**
  * What is known about who an account belongs to, from any one look at it.
  *
- * The core fills `email` and `name`, and nothing else. `plan` and `profile` are
- * there for identity readers and sources a plugin registers: a short free-form
- * description of the account and whatever structured detail goes with it. The
- * core carries them through untouched and never interprets them.
+ * An email and a display name, and nothing else: the core reads them from the
+ * app's cache, and a registered reader or source can only fill the same two.
  */
 export interface AccountSighting {
   email?: string;
   name?: string;
-  plan?: string;
-  profile?: Readonly<Record<string, unknown>>;
 }
 
 /** Who an account belongs to, as far as the app's own cache (and any reader) says. */
@@ -104,7 +100,7 @@ export function registerIdentityObserver(observer: IdentityObserver): Unregister
   return observers.add(observer);
 }
 
-const SIGHTING_FIELDS = ['email', 'name', 'plan', 'profile'] as const;
+const SIGHTING_FIELDS = ['email', 'name'] as const;
 
 function hasAnything(identity: Partial<AccountSighting> | undefined): boolean {
   return Boolean(identity && SIGHTING_FIELDS.some((field) => Boolean(identity[field])));
@@ -116,8 +112,6 @@ function sightingOf(identity: Partial<AccountSighting> | undefined): AccountSigh
   if (!identity) return out;
   if (identity.email) out.email = identity.email;
   if (identity.name) out.name = identity.name;
-  if (identity.plan) out.plan = identity.plan;
-  if (identity.profile) out.profile = identity.profile;
   return out;
 }
 
@@ -139,8 +133,6 @@ function withReaders(
     const found = sightingOf(extra);
     merged.email ??= found.email;
     merged.name ??= found.name;
-    merged.plan ??= found.plan;
-    merged.profile ??= found.profile;
   }
   const out = sightingOf(merged);
   return hasAnything(out) ? out : undefined;
@@ -248,10 +240,6 @@ export function resolveIdentity(
   const merged: ResolvedIdentity = {
     ...((fresh.email ?? remembered.email) ? { email: fresh.email ?? remembered.email } : {}),
     ...((fresh.name ?? remembered.name) ? { name: fresh.name ?? remembered.name } : {}),
-    ...((fresh.plan ?? remembered.plan) ? { plan: fresh.plan ?? remembered.plan } : {}),
-    ...((fresh.profile ?? remembered.profile)
-      ? { profile: fresh.profile ?? remembered.profile }
-      : {}),
   };
   if (!hasAnything(merged)) return undefined;
 

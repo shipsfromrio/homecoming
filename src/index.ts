@@ -104,19 +104,7 @@ export {
   type ImportUndoProvider,
   type ImportUndoResult,
 } from './ops/importUndo.js';
-export {
-  registerAccountPrefCarryAllowlist,
-  registerAppPrefAllowlist,
-  registerAppPrefWriteNotice,
-  type AccountPrefCarryAllowlist,
-  type AppPrefAllowlist,
-  type AppPrefWriteNotice,
-} from './store/appPrefs.js';
-export {
-  registerLayoutStorageWrite,
-  type LayoutStorageWrite,
-  type LocalStorageTextWrite,
-} from './engine/layout.js';
+export { registerAppPrefAllowlist, type AppPrefAllowlist } from './store/appPrefs.js';
 export { registerUpdateChannel, type UpdateChannel } from './update.js';
 export {
   registerThemeSlot,

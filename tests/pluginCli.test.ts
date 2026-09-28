@@ -115,20 +115,18 @@ describe('whoami --json, with identity readers and sources', () => {
   const reading = definePlugin({
     name: 'reading',
     identityReaders: [
-      (_store, accountUuid) => (accountUuid === NEW_ACCOUNT.accountUuid ? { plan: 'basic' } : {}),
+      (_store, accountUuid) =>
+        accountUuid === NEW_ACCOUNT.accountUuid ? { email: 'fresh@example.com' } : {},
     ],
   });
 
-  it('without a plugin, has the fields and nothing in them', async () => {
+  it('without a plugin, has the same three fields as ever and nothing in them', async () => {
     const { global } = signedIn();
     const result = await run([], [...global, 'whoami', '--json']);
     expect(lastJson(result)).toEqual({
       accountUuid: NEW_ACCOUNT.accountUuid,
       email: null,
       name: null,
-      plan: null,
-      remembered: false,
-      seenAt: null,
     });
   });
 
@@ -139,22 +137,18 @@ describe('whoami --json, with identity readers and sources', () => {
       accountUuid: NEW_ACCOUNT.accountUuid,
       email: 'someone@example.com',
       name: 'Someone',
-      plan: null,
       remembered: true,
       seenAt: SEEN_AT,
     });
   });
 
-  it('takes the plan from a reader, which makes the read fresh', async () => {
+  it('takes a field from a reader, which makes the read fresh', async () => {
     const { global } = signedIn();
     const result = await run([remembering, reading], [...global, 'whoami', '--json']);
     expect(lastJson(result)).toEqual({
       accountUuid: NEW_ACCOUNT.accountUuid,
-      email: 'someone@example.com',
+      email: 'fresh@example.com',
       name: 'Someone',
-      plan: 'basic',
-      remembered: false,
-      seenAt: null,
     });
   });
 
@@ -171,7 +165,7 @@ describe('whoami --json, with identity readers and sources', () => {
       ],
     });
     await run([reading, observing], [...global, 'whoami', '--json']);
-    expect(seen).toEqual([[NEW_ACCOUNT.accountUuid, { plan: 'basic' }]]);
+    expect(seen).toEqual([[NEW_ACCOUNT.accountUuid, { email: 'fresh@example.com' }]]);
   });
 
   it('lets `label --from-cache` name the account from what a source remembers', async () => {

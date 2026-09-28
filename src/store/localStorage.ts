@@ -184,37 +184,6 @@ function readRaw(store: StoreLayout, scriptKey: string): RawLocalStorageRecord |
 }
 
 /**
- * Read one key's value as plain text, exactly what `localStorage.getItem`
- * would return, or `undefined` when nothing has ever written it. For a key
- * whose value is not a JSON document; `readLocalStorageValue` is the reader for
- * one that is.
- */
-export function readLocalStorageText(store: StoreLayout, scriptKey: string): string | undefined {
-  return readRaw(store, scriptKey)?.text;
-}
-
-/**
- * Where a write batch touching `scriptKey` appends, and under which tag: the
- * key's own record when it has one (whatever its value's shape), the current
- * log otherwise. Unlike `readLocalStorageValue`, never parses the value, so a
- * key holding plain text is as good a target as one holding JSON.
- */
-export function localStorageWriteTarget(
-  store: StoreLayout,
-  scriptKey: string,
-): Pick<LocalStorageRecord, 'logPath' | 'highestSequence' | 'tablesUnreadable'> &
-  Partial<Pick<LocalStorageRecord, 'encoding'>> {
-  const raw = readRaw(store, scriptKey);
-  if (!raw) return currentLog(store);
-  return {
-    logPath: raw.logPath,
-    highestSequence: raw.highestSequence,
-    tablesUnreadable: raw.tablesUnreadable,
-    encoding: raw.encoding,
-  };
-}
-
-/**
  * Read one key's JSON document, or `undefined` when nothing has ever written it.
  */
 export function readLocalStorageValue(
@@ -259,12 +228,11 @@ function encodeText(text: string, encoding: LocalStorageEncoding): Buffer {
   return Buffer.concat([Buffer.from([TWO_BYTE_STRING]), Buffer.from(text, 'utf16le')]);
 }
 
-/**
- * One key's write: the JSON document that replaces its value, or (`text`) the
- * exact text that does, for a key whose value is not JSON at all.
- */
-export type LocalStorageWrite =
-  { scriptKey: string; document: Record<string, unknown> } | { scriptKey: string; text: string };
+/** One key's write: the JSON document that replaces its value. */
+export interface LocalStorageWrite {
+  scriptKey: string;
+  document: Record<string, unknown>;
+}
 
 /**
  * Replace one key's document by appending a write batch to the log — additive,
@@ -314,10 +282,7 @@ export function writeLocalStorageEntries(
 
   const entries: BatchEntry[] = writes.map((write) => ({
     key: localStorageKey(write.scriptKey),
-    value: encodeText(
-      'text' in write ? write.text : JSON.stringify(write.document),
-      record.encoding ?? 'latin1',
-    ),
+    value: encodeText(JSON.stringify(write.document), record.encoding ?? 'latin1'),
   }));
 
   const existing = readFileSync(record.logPath);

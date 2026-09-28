@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -16,7 +16,6 @@ import type { SweepReport } from '../src/ops/sweep.js';
 import type * as Safety from '../src/engine/safety.js';
 import { scanAccount } from '../src/store/scanner.js';
 import { candidateStoreRoots } from '../src/domain/paths.js';
-import { planLayout } from '../src/engine/layout.js';
 import { knownStores, resolveStoreArg } from '../src/engine/stores.js';
 import { statsDimensionNames, usageEventsInFile } from '../src/engine/stats.js';
 import { listAgentTools } from '../src/agentTools.js';
@@ -27,14 +26,9 @@ import {
   runSweepPhases,
 } from '../src/extensions.js';
 import { runImportUndo } from '../src/ops/importUndo.js';
-import {
-  appPrefWriteNotices,
-  planAccountPrefsCarry,
-  refuseGuarded,
-} from '../src/store/appPrefs.js';
+import { refuseGuarded } from '../src/store/appPrefs.js';
 import type { AccountOverview } from '../src/store/accounts.js';
 import { identityOf } from '../src/store/identity.js';
-import { localStorageDir } from '../src/store/localStorage.js';
 import { decorateAccount } from '../src/cli/accountDecorators.js';
 import { applyCommandExtenders } from '../src/cli/commandExtenders.js';
 import { FOSTER_NIGHT, themeColor } from '../src/tui/theme.js';
@@ -373,7 +367,6 @@ describe('the extension points a plugin can fill beyond commands and state', () 
   const account = NEW_ACCOUNT.accountUuid;
   const candidate = makeStore();
   const resolved = makeStore();
-  const layoutStore = makeStore();
   const asked: string[] = [];
   const seen: string[] = [];
 
@@ -381,7 +374,7 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     name: 'wide',
     storeRootCandidates: [() => [{ root: candidate.root, priority: 1 }]],
     storeArgResolvers: [(arg) => (arg === 'by-resolver' ? resolved : undefined)],
-    identityReaders: [(_store, uuid) => (uuid === account ? { plan: 'basic' } : undefined)],
+    identityReaders: [(_store, uuid) => (uuid === account ? { name: 'Someone' } : undefined)],
     identitySources: [
       (uuid) => (uuid === account ? { email: 'someone@example.com', seenAt: 1 } : undefined),
     ],
@@ -399,17 +392,6 @@ describe('the extension points a plugin can fill beyond commands and state', () 
         name: 'wide',
         select: () => [{ id: 'one', line: 'one import' }],
         undo: (id) => ({ ok: true, line: `undid ${id}` }),
-      },
-    ],
-    appPrefWriteNotices: [(write) => `wrote ${write.name}`],
-    accountPrefCarryAllowlists: [{ name: 'wide', keys: ['wideCarriedPref'] }],
-    layoutStorageWrites: [
-      {
-        name: 'wide',
-        writes: () => {
-          asked.push('layout');
-          return [];
-        },
       },
     ],
     updateChannel: { repo: 'example-owner/example-repo' },
@@ -447,20 +429,12 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     return printed;
   }
 
-  /** A store whose Local Storage exists, so `layout` asks the registered writes. */
-  function withLocalStorage(): void {
-    mkdirSync(localStorageDir(layoutStore), { recursive: true });
-    writeFileSync(path.join(localStorageDir(layoutStore), 'CURRENT'), 'MANIFEST-000001\n');
-    writeFileSync(layoutStore.desktopConfigFile, JSON.stringify({ preferences: {} }), 'utf8');
-  }
-
   /** Every point asked once, in one place, so registered and unregistered compare. */
   async function consult() {
     asked.length = 0;
     seen.length = 0;
     const signedIn = makeStore();
     writeFileSync(signedIn.configFile, JSON.stringify({ lastKnownAccountUuid: account }), 'utf8');
-    withLocalStorage();
     const transcript = path.join(
       mkdtempSync(path.join(tmpdir(), 'homecoming-plugin-t-')),
       't.jsonl',
@@ -474,14 +448,7 @@ describe('the extension points a plugin can fill beyond commands and state', () 
       }),
       'utf8',
     );
-    const carried = makeStore();
-    writeFileSync(
-      carried.desktopConfigFile,
-      JSON.stringify({ preferences: { wideCarriedPref: { [OLD_ACCOUNT.accountUuid]: 'kept' } } }),
-      'utf8',
-    );
     const printed = await greet();
-    planLayout({ store: layoutStore, target: NEW_ACCOUNT });
     let storeArg: string | undefined;
     try {
       storeArg = resolveStoreArg('by-resolver', () => [], {}).root;
@@ -495,17 +462,11 @@ describe('the extension points a plugin can fill beyond commands and state', () 
       observed: [...seen],
       decoration: decorateAccount({} as AccountOverview, { store, ledger: ledger() }),
       accountMenu: listAccountMenuItems().map((item) => item.value),
-      greet: asked.filter((step) => step !== 'layout'),
+      greet: [...asked],
       hint: printed.some((line) => line.includes('wide hint')),
       dimensions: statsDimensionNames(),
       counters: usageEventsInFile(transcript, 0)[0]?.counters,
       imports: runImportUndo({ store, ledger: ledger(), dryRun: true }).lines,
-      notices: appPrefWriteNotices(
-        { name: 'menuBarEnabled', from: true, to: false, unset: false },
-        { store, guarded: false },
-      ),
-      layoutAsked: asked.includes('layout'),
-      carried: planAccountPrefsCarry(carried, NEW_ACCOUNT, OLD_ACCOUNT).changes,
       updateRepo: updateRepo({}),
       themeSlot: themeColor(FOSTER_NIGHT, 'wide'),
       agentTools: listAgentTools().map((tool) => tool.name),
@@ -518,7 +479,7 @@ describe('the extension points a plugin can fill beyond commands and state', () 
 
     expect(got.defaultStores[0]).toBe(candidate.root);
     expect(got.storeArg).toBe(resolved.root);
-    expect(got.identity).toEqual({ email: 'someone@example.com', plan: 'basic' });
+    expect(got.identity).toEqual({ email: 'someone@example.com', name: 'Someone' });
     expect(got.observed).toEqual([account]);
     expect(got.decoration).toMatchObject({ marker: '+', meta: ['example'] });
     expect(got.accountMenu).toContain('wide-action');
@@ -527,9 +488,6 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     expect(got.dimensions).toEqual(['model', 'week', 'wide']);
     expect(got.counters).toEqual({ wide: 1 });
     expect(got.imports).toEqual(['undid one']);
-    expect(got.notices).toEqual(['wrote menuBarEnabled']);
-    expect(got.layoutAsked).toBe(true);
-    expect(got.carried).toEqual({ wideCarriedPref: 'kept' });
     expect(got.updateRepo).toBe('example-owner/example-repo');
     expect(got.themeSlot).toBe('#112233');
     expect(got.agentTools).toEqual(['wide']);
@@ -550,9 +508,6 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     expect(got.dimensions).toEqual(['model', 'week']);
     expect(got.counters).toBeUndefined();
     expect(got.imports).toEqual([]);
-    expect(got.notices).toEqual([]);
-    expect(got.layoutAsked).toBe(false);
-    expect(got.carried).toEqual({});
     expect(got.updateRepo).not.toBe('example-owner/example-repo');
     expect(got.themeSlot).toBeUndefined();
     expect(got.agentTools).toEqual([]);

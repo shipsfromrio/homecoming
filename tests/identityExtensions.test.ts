@@ -91,7 +91,6 @@ describe('identity sources', () => {
       registerIdentitySource(() => ({
         email: 'stale@example.com',
         name: 'Stale',
-        plan: 'remembered plan',
         seenAt: 5,
       })),
     );
@@ -100,7 +99,6 @@ describe('identity sources', () => {
     expect(identity).toEqual({
       email: 'fresh@example.com',
       name: 'Fresh',
-      plan: 'remembered plan',
     });
     expect(identity?.remembered).toBeUndefined();
   });
@@ -119,24 +117,31 @@ describe('identity sources', () => {
 });
 
 describe('identity readers', () => {
-  it('add plan and profile without overwriting the email and name the core read', () => {
+  it('never overwrite the email and name the core read', () => {
     signedInAs(ACCOUNT);
     cachedProfile(ACCOUNT, 'john@example.com', 'John');
     undo.push(
       registerIdentityReader(() => ({
         email: 'reader@example.com',
         name: 'Reader',
-        plan: 'team',
-        profile: { seats: 3 },
       })),
     );
 
     expect(readIdentityFromCache(store, ACCOUNT)).toEqual({
       email: 'john@example.com',
       name: 'John',
-      plan: 'team',
-      profile: { seats: 3 },
     });
+  });
+
+  it('carry only an email and a name, whatever else they hand back', () => {
+    signedInAs(ACCOUNT);
+    undo.push(
+      registerIdentityReader(
+        () => ({ name: 'Reader', extra: 'dropped' }) as unknown as { name: string },
+      ),
+    );
+
+    expect(readIdentityFromCache(store, ACCOUNT)).toEqual({ name: 'Reader' });
   });
 
   it('are asked about every account, and one that throws is skipped', () => {
@@ -146,9 +151,9 @@ describe('identity readers', () => {
         throw new Error('broken');
       }),
     );
-    undo.push(registerIdentityReader((_store, uuid) => (uuid === OTHER ? { plan: 'solo' } : {})));
+    undo.push(registerIdentityReader((_store, uuid) => (uuid === OTHER ? { name: 'Other' } : {})));
 
-    expect(identityOf(store, OTHER, ledger)).toEqual({ plan: 'solo' });
+    expect(identityOf(store, OTHER, ledger)).toEqual({ name: 'Other' });
   });
 });
 
@@ -198,7 +203,7 @@ describe('unregistering', () => {
     const known: KnownIdentity = { email: 'kept@example.com', seenAt: 1 };
     const steps = [
       registerIdentitySource(() => known),
-      registerIdentityReader(() => ({ plan: 'team' })),
+      registerIdentityReader(() => ({ name: 'Reader' })),
       registerIdentityObserver({ name: 'ear', onIdentitySeen: (uuid) => heard.push(uuid) }),
     ];
     expect(identityOf(store, ACCOUNT, ledger)).toMatchObject({ email: 'kept@example.com' });
