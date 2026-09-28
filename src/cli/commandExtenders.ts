@@ -14,8 +14,20 @@ export interface CommandExtenderContext {
   args: readonly unknown[];
   /** Every option the command parsed, its own and the global ones, extenders' included. */
   options: Readonly<Record<string, unknown>>;
-  store: StoreLayout;
-  ledger: Ledger;
+  /**
+   * The store and ledger the command acts on, resolved on first read and not
+   * before: a command that answers for a missing store on its own (`doctor
+   * --json` prints `{ store: null, error }`) still does, unless a hook asks.
+   * Reading either with no store throws the error the command would have.
+   */
+  readonly store: StoreLayout;
+  readonly ledger: Ledger;
+  /**
+   * False on a run of a command that writes only when confirmed (one with a
+   * `--yes` option, and `--confirm` too where it has one) that was not: its
+   * dry run, which a `before` cannot stand in for.
+   */
+  confirmed: boolean;
   /** Prints a value as indented JSON, the way every `--json` output does. */
   print(value: unknown): void;
 }
@@ -28,6 +40,12 @@ export interface CommandExtenderContext {
  * returns `true` has handled the invocation itself, and the core action does
  * not run; anything else lets it run. `after` runs once the action (or the
  * `before` that stood in for it) finished without throwing.
+ *
+ * On a command that writes only when confirmed (`--yes`, and `--confirm` as
+ * well where the command has it, as `purge` does), a `before` stands in only
+ * when the run carries that same confirmation. Without it the `true` is not
+ * obeyed and the core action runs, which on those commands is the dry run:
+ * the confirmation a destructive command asks for is never skipped by a hook.
  */
 export interface CommandExtender {
   command: string;
@@ -82,6 +100,23 @@ type ActionHandler = (args: unknown[]) => unknown;
 interface WithAction {
   _actionHandler?: ActionHandler | null;
   processedArgs?: unknown[];
+}
+
+/** Whether the command's own options make it write only when confirmed. */
+function confirmationOf(command: Command): { yes: boolean; confirm: boolean } {
+  const longs = new Set(command.options.map((option) => option.long));
+  return { yes: longs.has('--yes'), confirm: longs.has('--confirm') };
+}
+
+/**
+ * Whether this run carries the confirmation its command asks for. A command
+ * with neither option is always confirmed: there is nothing to skip.
+ */
+function isConfirmed(command: Command, options: Readonly<Record<string, unknown>>): boolean {
+  const asks = confirmationOf(command);
+  if (!asks.yes) return true;
+  if (options.dryRun === true || options.yes !== true) return false;
+  return !asks.confirm || (options.confirm !== undefined && options.confirm !== false);
 }
 
 function findCommand(root: Command, path: string): Command | undefined {
@@ -147,17 +182,32 @@ export function applyCommandExtenders(
       const holder = command as unknown as WithAction;
       const original = holder._actionHandler as ActionHandler;
       holder._actionHandler = async (args: unknown[]) => {
-        const { store, ledger } = resolve(command);
+        const active = extenders.filter((extender) => extender.command === path);
+        const pathHints = hints.filter((item) => item.command === path);
+        // Nothing registered for this command any more: exactly the core
+        // action, with the store resolved by it alone.
+        if (active.length === 0 && pathHints.length === 0) {
+          await original.call(command, args);
+          return;
+        }
+
+        let resolved: { store: StoreLayout; ledger: Ledger } | undefined;
+        const lazily = () => (resolved ??= resolve(command));
         const options = command.optsWithGlobals<Record<string, unknown>>();
+        const confirmed = isConfirmed(command, options);
         const context: CommandExtenderContext = {
           command,
           args: holder.processedArgs ?? args,
           options,
-          store,
-          ledger,
+          get store() {
+            return lazily().store;
+          },
+          get ledger() {
+            return lazily().ledger;
+          },
+          confirmed,
           print,
         };
-        const active = extenders.filter((extender) => extender.command === path);
 
         let handled = false;
         for (const extender of active) {
@@ -166,14 +216,14 @@ export function applyCommandExtenders(
             break;
           }
         }
-        if (!handled) await original.call(command, args);
+        if (!handled || !confirmed) await original.call(command, args);
         for (const extender of active) await extender.after?.(context);
 
         if (options.json) return;
-        for (const hint of hints.filter((item) => item.command === path)) {
+        for (const hint of pathHints) {
           let text: string | undefined;
           try {
-            text = hint.text({ options, store, ledger });
+            text = hint.text({ options, store: context.store, ledger: context.ledger });
           } catch {
             text = undefined;
           }

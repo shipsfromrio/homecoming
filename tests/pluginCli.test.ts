@@ -388,6 +388,28 @@ describe('doctor --json and a check with top-level keys', () => {
   });
 });
 
+describe('doctor --json with no store, extended', () => {
+  it('still prints its own JSON when a plugin extends or hints on doctor', async () => {
+    const empty = mkdtempSync(path.join(tmpdir(), 'homecoming-plugin-nostore-'));
+    vi.stubEnv('LOCALAPPDATA', empty);
+    vi.stubEnv('APPDATA', empty);
+    const extending = definePlugin({
+      name: 'extending',
+      commandExtenders: [{ command: 'doctor', after: () => undefined }],
+      nextStepHints: [{ command: 'doctor', text: ({ store }) => store.root }],
+    });
+    try {
+      for (const plugins of [[], [extending]]) {
+        const result = await run(plugins, ['--ledger', ledgerPath(), 'doctor', '--json']);
+        expect(lastJson(result)).toEqual({ store: null, error: 'no Claude Desktop store found' });
+        expect(result.exitCode).toBe(1);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe('stores and a provider note', () => {
   it('prints the note a provider attached, and nothing extra without one', async () => {
     const { global, root } = signedIn();

@@ -93,7 +93,8 @@ export interface PluginContext {
  *   may hand back a store or target for the next screens.
  * - `accountMenuItems`: entries in the menu an account row opens.
  * - `commandExtenders`: options and before/after hooks on a core command; a
- *   `before` returning `true` stands in for the core action.
+ *   `before` returning `true` stands in for the core action, and on a command
+ *   that writes only when confirmed, only on a confirmed run.
  * - `nextStepHints`: a dim line after a core command, never on `--json`.
  * - `statsDimensions`: further values `stats --by` accepts.
  * - `statsCounters`: more things `stats` counts per record.
