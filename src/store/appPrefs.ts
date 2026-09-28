@@ -323,6 +323,57 @@ export interface PrefWriteResult {
 }
 
 /**
+ * A line to print after one preference was written, or `undefined` for
+ * nothing to say. `guarded` is true when the preference is one the app guards
+ * (see `PrefSpec.guard`), which a write only reaches because a registered
+ * allowlist named it: the place for a plugin to say what that write means and
+ * how to take it back. The core registers none, and prints nothing extra.
+ */
+export type AppPrefWriteNotice = (
+  write: PrefWrite,
+  context: { store: StoreLayout; guarded: boolean },
+) => string | undefined;
+
+const writeNotices: AppPrefWriteNotice[] = [];
+
+/** Registers a write notice. Returns a function that removes it again. */
+export function registerAppPrefWriteNotice(notice: AppPrefWriteNotice): Unregister {
+  writeNotices.push(notice);
+  return () => {
+    const at = writeNotices.indexOf(notice);
+    if (at >= 0) writeNotices.splice(at, 1);
+  };
+}
+
+/**
+ * Every registered notice's line for one write, in registration order. Asked
+ * after the write has landed, so a notice that throws cannot undo it and must
+ * not hide it either: its failure becomes a line of its own.
+ */
+export function appPrefWriteNotices(
+  write: PrefWrite,
+  context: { store: StoreLayout; guarded: boolean },
+): string[] {
+  const lines: string[] = [];
+  for (const notice of [...writeNotices]) {
+    try {
+      const line = notice(write, context);
+      if (line) lines.push(line);
+    } catch (error) {
+      lines.push(
+        `a write notice failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return lines;
+}
+
+/** Whether the app guards this preference (see `PrefSpec.guard`). */
+export function isGuardedPref(name: string): boolean {
+  return specOf(name)?.guard === true;
+}
+
+/**
  * Write one preference, and nothing else.
  *
  * The neighbours are the point. This file holds the MCP server list and every
@@ -397,6 +448,38 @@ export const NEVER_CARRIED_ACCOUNT_PREFS = [
   'bypassPermissionsOptInByAccount',
 ] as const;
 
+/**
+ * More account-keyed preferences `homecoming layout` may carry, one plugin's
+ * worth. The core carries only `ACCOUNT_KEYED_PREFS`. A name in
+ * `NEVER_CARRIED_ACCOUNT_PREFS` travels only when a registered allowlist names
+ * it, which is a decision to copy a safety consent between accounts: whoever
+ * registers it answers for that. Naming one does not open the other.
+ */
+export interface AccountPrefCarryAllowlist {
+  name: string;
+  keys: readonly string[];
+}
+
+const accountPrefCarryAllowlists: AccountPrefCarryAllowlist[] = [];
+
+/** Registers a carry allowlist. Returns a function that removes it again. */
+export function registerAccountPrefCarryAllowlist(list: AccountPrefCarryAllowlist): Unregister {
+  accountPrefCarryAllowlists.push(list);
+  return () => {
+    const at = accountPrefCarryAllowlists.indexOf(list);
+    if (at >= 0) accountPrefCarryAllowlists.splice(at, 1);
+  };
+}
+
+/** The core's carried names, then every registered one, each once. */
+function carriedAccountPrefs(): string[] {
+  const names: string[] = [...ACCOUNT_KEYED_PREFS];
+  for (const list of accountPrefCarryAllowlists) {
+    for (const key of list.keys) if (!names.includes(key)) names.push(key);
+  }
+  return names;
+}
+
 export interface AccountPrefCarryPlan {
   from?: AccountRef;
   /** Pref name -> the value to set under the target's own accountUuid entry. */
@@ -418,7 +501,7 @@ export function planAccountPrefsCarry(
   if (!source) return { changes: {} };
   const stored = settingsOf(store) ?? {};
   const changes: Record<string, unknown> = {};
-  for (const name of ACCOUNT_KEYED_PREFS) {
+  for (const name of carriedAccountPrefs()) {
     const map = stored[name];
     const record =
       map && typeof map === 'object' && !Array.isArray(map) ? (map as Record<string, unknown>) : {};
@@ -435,12 +518,15 @@ export function writeAccountPrefsCarry(
   changes: Record<string, unknown>,
   options: BackupOptions = {},
 ): { backup: string } {
-  const carried: readonly string[] = ACCOUNT_KEYED_PREFS;
+  // Asked fresh here, not trusted from the plan: an allowlist taken away
+  // between planning and writing takes its names with it. A never-carried name
+  // passes only through a registered allowlist that names it.
+  const carried = carriedAccountPrefs();
   const refused = Object.keys(changes).filter((name) => !carried.includes(name));
   if (refused.length > 0) {
     throw new Error(
       `refusing to copy ${refused.join(', ')} between accounts: only ${carried.join(', ')} ` +
-        'is carried, and a safety consent is never inherited',
+        `${carried.length === 1 ? 'is' : 'are'} carried, and a safety consent is never inherited`,
     );
   }
   return rewriteDesktopConfig(

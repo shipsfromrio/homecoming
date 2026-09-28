@@ -11,6 +11,44 @@ const CODE_SESSIONS = 'claude-code-sessions';
 const AGENT_SESSIONS = 'local-agent-mode-sessions';
 
 /**
+ * One more place an installation may keep its userData, offered by a registered
+ * {@link StoreRootCandidateSource}. Lower `priority` sorts first; the core's own
+ * candidates all sit at {@link CORE_STORE_ROOT_PRIORITY}, so a source that wants
+ * its root to become the default `resolveStore` picks goes below it, and one
+ * that only wants its root known goes above.
+ *
+ * A candidate is exactly as trusted as the core's: it is treated as an
+ * installation the app itself runs from without being told (see
+ * `storeIdentity`), so a source should offer only roots the app would use on
+ * its own, never an arbitrary directory. Arbitrary directories are what
+ * `--store <path>` is for.
+ */
+export interface StoreRootCandidate {
+  root: string;
+  priority: number;
+}
+
+/** A source of store roots beyond the conventional ones. Unchecked, like the core's. */
+export type StoreRootCandidateSource = (env: NodeJS.ProcessEnv) => StoreRootCandidate[];
+
+/** Where every candidate the core itself knows sits in the merged order. */
+export const CORE_STORE_ROOT_PRIORITY = 100;
+
+const candidateSources: StoreRootCandidateSource[] = [];
+
+/**
+ * Adds a source of store roots. Returns a function that removes it again. With
+ * none registered, `candidateStoreRoots` is exactly the core's list.
+ */
+export function registerStoreRootCandidates(source: StoreRootCandidateSource): () => void {
+  candidateSources.push(source);
+  return () => {
+    const at = candidateSources.indexOf(source);
+    if (at >= 0) candidateSources.splice(at, 1);
+  };
+}
+
+/**
  * Claude Desktop ships on Windows as an MSIX package, so the AppData it sees is
  * redirected into the package container. Writing to the plain %APPDATA%\Claude
  * would be invisible to the app; the physical package path is the real store.
@@ -18,7 +56,7 @@ const AGENT_SESSIONS = 'local-agent-mode-sessions';
  * The package folder name ends in a publisher hash (identical on every machine),
  * so it is matched by prefix rather than hardcoded.
  */
-export function candidateStoreRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+function coreStoreRoots(env: NodeJS.ProcessEnv): string[] {
   const roots: string[] = [];
   const localAppData = env.LOCALAPPDATA;
 
@@ -35,7 +73,42 @@ export function candidateStoreRoots(env: NodeJS.ProcessEnv = process.env): strin
   if (env.APPDATA) roots.push(path.join(env.APPDATA, 'Claude'));
   roots.push(path.join(homedir(), '.config', 'Claude'));
   roots.push(path.join(homedir(), 'Library', 'Application Support', 'Claude'));
+  return roots;
+}
 
+/**
+ * Every store root this environment knows without being told, most preferred
+ * first: the core's own (see `coreStoreRoots`) merged with whatever registered
+ * sources offer, ordered by priority (a stable sort, so equal priorities keep
+ * the order they were offered in, the core's first). A root offered twice keeps
+ * its best place. Only directories that already hold Code sessions survive,
+ * whoever offered them.
+ *
+ * A source that throws is a bug in that source, and it propagates: quietly
+ * dropping it would resolve a different default store than the one asked for.
+ */
+export function candidateStoreRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const offered: StoreRootCandidate[] = coreStoreRoots(env).map((root) => ({
+    root,
+    priority: CORE_STORE_ROOT_PRIORITY,
+  }));
+  for (const source of candidateSources) {
+    for (const candidate of source(env)) {
+      if (candidate.root) offered.push(candidate);
+    }
+  }
+  const ordered = offered
+    .map((candidate, index) => ({ ...candidate, index }))
+    .sort((a, b) => a.priority - b.priority || a.index - b.index);
+
+  const seen = new Set<string>();
+  const roots: string[] = [];
+  for (const { root } of ordered) {
+    const key = comparablePath(root);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    roots.push(root);
+  }
   return roots.filter((dir) => existsSync(path.join(dir, CODE_SESSIONS)));
 }
 

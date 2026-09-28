@@ -62,6 +62,29 @@ export interface KnownStore {
    * as two unrelated installations rather than one store seen two ways.
    */
   legacy?: boolean;
+  /**
+   * A line of explanation the provider that offered this installation attached
+   * (its `hint`), for anything that lists stores to print beside the root. The
+   * core writes none. Named `note` because `hint` above already says where the
+   * entry came from.
+   */
+  note?: string;
+  /**
+   * What to do when this installation is gone, as the provider that offered it
+   * worded it. Appended to the error `--store <name>` raises for a gone entry;
+   * the core writes none.
+   */
+  remedy?: string;
+}
+
+/** One installation a {@link StoreProvider} offers. */
+export interface ProvidedStore {
+  root: string;
+  name?: string;
+  /** A line of explanation, surfaced as `KnownStore.note`. */
+  hint?: string;
+  /** What to do when the directory is gone, surfaced as `KnownStore.remedy`. */
+  remedy?: string;
 }
 
 /**
@@ -71,7 +94,7 @@ export interface KnownStore {
 export type StoreProvider = (context: {
   events: LedgerEvent[];
   env: NodeJS.ProcessEnv;
-}) => { root: string; name?: string }[];
+}) => ProvidedStore[];
 
 const storeProviders: StoreProvider[] = [];
 
@@ -92,14 +115,20 @@ export function knownStores(
   const seen = new Map<string, KnownStore>();
   const stores: KnownStore[] = [];
 
-  const offer = (root: string, hint: KnownStore['hint'], name?: string, legacy?: boolean): void => {
+  const offer = (
+    root: string,
+    hint: KnownStore['hint'],
+    name?: string,
+    legacy?: boolean,
+    extra: Pick<KnownStore, 'note' | 'remedy'> = {},
+  ): void => {
     const store = layoutFor(root);
     // The filesystem decides what is the same store and what still exists.
     const key = directoryKey(store.root);
 
     if (key === undefined) {
       if (hint === 'provided' && name !== undefined) {
-        stores.push({ root: store.root, name, hint, running: false, exists: false });
+        stores.push({ root: store.root, name, hint, running: false, exists: false, ...extra });
       }
       return;
     }
@@ -108,6 +137,8 @@ export function knownStores(
     if (known) {
       if (name !== undefined) known.name ??= name;
       if (legacy) known.legacy = true;
+      if (extra.note !== undefined) known.note ??= extra.note;
+      if (extra.remedy !== undefined) known.remedy ??= extra.remedy;
       return;
     }
 
@@ -121,6 +152,7 @@ export function knownStores(
       ...(config.lastKnownAccountUuid ? { accountUuid: config.lastKnownAccountUuid } : {}),
       ...(credentialReported(store) ? { hasTokenCache: true } : {}),
       ...(legacy ? { legacy: true } : {}),
+      ...extra,
     };
     seen.set(key, found);
     stores.push(found);
@@ -133,7 +165,12 @@ export function knownStores(
     offer(dir, 'installed app', undefined, isLegacyAppDataStore(dir, env));
   }
   for (const provider of storeProviders) {
-    for (const entry of provider({ events, env })) offer(entry.root, 'provided', entry.name);
+    for (const entry of provider({ events, env })) {
+      offer(entry.root, 'provided', entry.name, undefined, {
+        ...(entry.hint !== undefined ? { note: entry.hint } : {}),
+        ...(entry.remedy !== undefined ? { remedy: entry.remedy } : {}),
+      });
+    }
   }
 
   return stores;
@@ -228,6 +265,29 @@ function resolveByAccount(
 }
 
 /**
+ * One more meaning for `--store`: given the argument and what is already known,
+ * the store it names, or `undefined` for "not mine". Registered with
+ * {@link registerStoreArgResolver}; consulted by {@link resolveStoreArg} after
+ * a path that exists, a provided store's name and an account, and before the
+ * path-piece pass. It can only add meanings: every earlier one still wins.
+ */
+export type StoreArgResolver = (
+  arg: string,
+  context: { events: LedgerEvent[]; env: NodeJS.ProcessEnv; stores: readonly KnownStore[] },
+) => StoreLayout | undefined;
+
+const storeArgResolvers: StoreArgResolver[] = [];
+
+/** Adds a meaning for `--store`. Returns a function that removes it again. */
+export function registerStoreArgResolver(resolver: StoreArgResolver): () => void {
+  storeArgResolvers.push(resolver);
+  return () => {
+    const at = storeArgResolvers.indexOf(resolver);
+    if (at >= 0) storeArgResolvers.splice(at, 1);
+  };
+}
+
+/**
  * What `--store` names: a directory, a provided store's name, an account (label
  * or uuid prefix), or a distinctive piece of a known path.
  *
@@ -254,13 +314,31 @@ export function resolveStoreArg(
   const named = stores.find((store) => store.name?.toLowerCase() === wanted);
   if (named) {
     if (!named.exists) {
-      throw new Error(`store "${named.name}" is known at ${named.root}, which is gone.`);
+      throw new Error(
+        `store "${named.name}" is known at ${named.root}, which is gone.` +
+          (named.remedy ? `\n${named.remedy}` : ''),
+      );
     }
     return layoutFor(named.root);
   }
 
   const byAccount = resolveByAccount(arg, stores, project(events));
   if (byAccount) return byAccount;
+
+  // Registered resolvers get their turn after every meaning the core owns
+  // except the loosest one. A resolver that throws is set aside rather than
+  // allowed to replace the answer: the path-piece pass may still find the
+  // store, and if nothing does, its failure is reported alongside the
+  // "not a directory" error instead of in place of it.
+  const resolverFailures: string[] = [];
+  for (const resolver of [...storeArgResolvers]) {
+    try {
+      const found = resolver(arg, { events, env, stores });
+      if (found) return found;
+    } catch (error) {
+      resolverFailures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
 
   // A name already had its chance above; a gone entry matching here by path
   // piece would resolve to a directory that is not there, so it is excluded.
@@ -286,6 +364,7 @@ export function resolveStoreArg(
   throw new Error(
     `--store "${arg}" is not a directory, a known store name, a known account, or a piece ` +
       `of a known path.` +
-      (known ? `\nKnown installations:\n${known}` : ''),
+      (known ? `\nKnown installations:\n${known}` : '') +
+      resolverFailures.map((message) => `\nA store resolver failed: ${message}`).join(''),
   );
 }
