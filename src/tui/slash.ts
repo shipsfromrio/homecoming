@@ -1,5 +1,5 @@
-import { listMenuItems } from '../extensions.js';
-import type { Choice } from './ui.js';
+import { listAccountMenuItems, listMenuItems, type AccountMenuItem } from '../extensions.js';
+import type { Choice, DashboardAccount } from './ui.js';
 
 /**
  * The command menu. Values match the old clack menu so the flows and the
@@ -116,13 +116,57 @@ export function menuCommands(): Command[] {
  * the destination, so "bring its sessions here" would be a no-op there; it gets
  * the read screens instead.
  */
-export function accountActions(account: {
-  isCurrent: boolean;
-  label?: string;
-  identityName?: string;
-  shortId: string;
-  sessions: number;
-}): Choice[] {
+export function accountActions(account: DashboardAccount): Choice[] {
+  return [...coreAccountActions(account), ...extraAccountActions(account)];
+}
+
+/** The verbs the account menu answers to in the core; a registered item cannot take one. */
+export const CORE_ACCOUNT_VERBS: readonly string[] = ['foster-from', 'details', 'label'];
+
+/**
+ * The registered account menu item answering to `value`, or undefined. An item
+ * whose value is a core verb (account or menu) or a registered menu item's
+ * value is never returned, and the first of two items with one value wins, so
+ * what the menu offered and what the session runs cannot disagree.
+ */
+export function accountMenuItemFor(value: string): AccountMenuItem | undefined {
+  const items = listAccountMenuItems();
+  if (items.length === 0) return undefined;
+  const taken = new Set<string>([
+    ...CORE_ACCOUNT_VERBS,
+    ...menuCommands().flatMap((command) => [command.value, command.slash]),
+  ]);
+  if (taken.has(value)) return undefined;
+  return items.find((item) => item.value === value);
+}
+
+function extraAccountActions(account: DashboardAccount): Choice[] {
+  const choices: Choice[] = [];
+  const seen = new Set<string>();
+  for (const item of listAccountMenuItems()) {
+    if (seen.has(item.value) || accountMenuItemFor(item.value) !== item) continue;
+    seen.add(item.value);
+    let offered: boolean;
+    let label: string;
+    try {
+      offered = item.when ? item.when(account) : true;
+      label = typeof item.label === 'function' ? item.label(account) : item.label;
+    } catch {
+      // An item that cannot decide about this row is not offered on it; the
+      // menu the core builds must still open.
+      continue;
+    }
+    if (!offered) continue;
+    choices.push({
+      value: item.value,
+      label,
+      ...(item.hint !== undefined ? { hint: item.hint } : {}),
+    });
+  }
+  return choices;
+}
+
+function coreAccountActions(account: DashboardAccount): Choice[] {
   const name = account.label ?? account.identityName ?? account.shortId;
   const label: Choice = {
     value: 'label',
@@ -163,6 +207,40 @@ export const COMMAND_ALIASES: Record<string, string> = {
   welcome: 'home',
 };
 
+function aliasKey(word: string): string {
+  return word.replace(/^\//, '').trim().toLowerCase();
+}
+
+/**
+ * The core aliases plus every alias a registered menu item declares. An alias
+ * already in the core table, or equal to any entry's value or slash, is
+ * ignored, and so is one an earlier item claimed; an item that is not in the
+ * menu (it clashed with a core entry) brings no aliases.
+ */
+export function menuAliases(commands: Command[] = menuCommands()): Record<string, string> {
+  const items = listMenuItems();
+  if (items.length === 0) return COMMAND_ALIASES;
+  const aliases: Record<string, string> = { ...COMMAND_ALIASES };
+  const taken = new Set(commands.flatMap((command) => [command.value, command.slash]));
+  const core = new Set(COMMANDS.map((command) => command.value));
+  // The entry the menu actually added for this item: same value and slash, and
+  // not a core entry the item tried to shadow.
+  const present = new Set(
+    commands
+      .filter((command) => !core.has(command.value))
+      .map((command) => `${command.value}\u0000${command.slash}`),
+  );
+  for (const item of items) {
+    if (!present.has(`${item.value}\u0000${item.slash}`)) continue;
+    for (const word of item.aliases ?? []) {
+      const key = aliasKey(word);
+      if (!key || key in aliases || taken.has(key)) continue;
+      aliases[key] = item.value;
+    }
+  }
+  return aliases;
+}
+
 /** Case-insensitive subsequence / prefix score. 0 means no match. */
 export function fuzzyScore(text: string, query: string): number {
   const t = text.toLowerCase();
@@ -187,7 +265,9 @@ export function fuzzyScore(text: string, query: string): number {
 export function filterCommands(query: string, commands: Command[] = menuCommands()): Command[] {
   const raw = query.replace(/^\//, '').trim();
   if (!raw) return commands;
-  const alias = COMMAND_ALIASES[raw.toLowerCase()];
+  const table = menuAliases(commands);
+  const key = raw.toLowerCase();
+  const alias = Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
   const scored = commands
     .map((command) => {
       const score = Math.max(
