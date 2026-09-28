@@ -411,6 +411,9 @@ export function renderAccount(row: AccountOverview): string[] {
     );
   }
 
+  // Lines a plugin's account decorator added; none without one.
+  for (const line of row.decoration?.detailLines ?? []) lines.push(`  ${line}`);
+
   return lines;
 }
 

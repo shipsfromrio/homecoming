@@ -1,29 +1,200 @@
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { StoreLayout } from '../domain/types.js';
+import type { Ledger } from '../ledger/log.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 import { readConfig } from '../store/config.js';
 import { readAccountFromResponseCache } from './responseCache.js';
 
-/** Who an account belongs to, as far as the app's own cache says. */
-export interface CachedIdentity {
+/** Removes what a `register*` call added. */
+type Unregister = () => void;
+
+/**
+ * What is known about who an account belongs to, from any one look at it.
+ *
+ * The core fills `email` and `name`, and nothing else. `plan` and `profile` are
+ * there for identity readers and sources a plugin registers: a short free-form
+ * description of the account and whatever structured detail goes with it. The
+ * core carries them through untouched and never interprets them.
+ */
+export interface AccountSighting {
   email?: string;
   name?: string;
+  plan?: string;
+  profile?: Readonly<Record<string, unknown>>;
 }
 
+/** Who an account belongs to, as far as the app's own cache (and any reader) says. */
+export type CachedIdentity = AccountSighting;
+
 /** A sighting remembered from an earlier run, dated. */
-export type KnownIdentity = CachedIdentity & {
+export type KnownIdentity = AccountSighting & {
   /** When any part of this was last confirmed. */
   seenAt: number;
 };
 
 /** The identity to show: fresh cache, remembered, or both. */
-export type ResolvedIdentity = CachedIdentity & {
+export type ResolvedIdentity = AccountSighting & {
   /** True when nothing was in the cache and every part was remembered. */
   remembered?: boolean;
   /** When the remembered part was last confirmed, for anything not read fresh. */
   seenAt?: number;
 };
+
+function registry<T>(): { items: T[]; add(item: T): Unregister } {
+  const items: T[] = [];
+  return {
+    items,
+    add(item: T): Unregister {
+      items.push(item);
+      return () => {
+        const at = items.indexOf(item);
+        if (at >= 0) items.splice(at, 1);
+      };
+    },
+  };
+}
+
+/**
+ * A further place to read an account's identity from at rest, beside the app's
+ * cache. Consulted by `readIdentityFromCache` after the core read, in
+ * registration order, and only for the fields still empty: a reader never
+ * overwrites what the core (or an earlier reader) found. One that throws is
+ * skipped.
+ */
+export type IdentityReader = (
+  store: StoreLayout,
+  accountUuid: string,
+) => Partial<AccountSighting> | undefined;
+
+const readers = registry<IdentityReader>();
+
+export function registerIdentityReader(reader: IdentityReader): Unregister {
+  return readers.add(reader);
+}
+
+/**
+ * Somewhere an earlier sighting was kept, usually the plugin's own ledger slot.
+ * `identityOf` falls back to the one with the most recent `seenAt` for anything
+ * the fresh read did not find. The core keeps no memory of its own, so without
+ * a source the answer is exactly the fresh read.
+ */
+export type IdentitySource = (accountUuid: string, ledger: Ledger) => KnownIdentity | undefined;
+
+const sources = registry<IdentitySource>();
+
+export function registerIdentitySource(source: IdentitySource): Unregister {
+  return sources.add(source);
+}
+
+/**
+ * Told whenever a fresh read found something about an account, so a plugin can
+ * write the sighting down (and later answer for it as an `IdentitySource`).
+ * Called only when the read brought something back, never for a remembered
+ * answer; one that throws is isolated from the read and from other observers.
+ */
+export interface IdentityObserver {
+  name: string;
+  onIdentitySeen(accountUuid: string, identity: AccountSighting, ledger: Ledger): void;
+}
+
+const observers = registry<IdentityObserver>();
+
+export function registerIdentityObserver(observer: IdentityObserver): Unregister {
+  return observers.add(observer);
+}
+
+const SIGHTING_FIELDS = ['email', 'name', 'plan', 'profile'] as const;
+
+function hasAnything(identity: Partial<AccountSighting> | undefined): boolean {
+  return Boolean(identity && SIGHTING_FIELDS.some((field) => Boolean(identity[field])));
+}
+
+/** Only the sighting fields, each kept when present. */
+function sightingOf(identity: Partial<AccountSighting> | undefined): AccountSighting {
+  const out: AccountSighting = {};
+  if (!identity) return out;
+  if (identity.email) out.email = identity.email;
+  if (identity.name) out.name = identity.name;
+  if (identity.plan) out.plan = identity.plan;
+  if (identity.profile) out.profile = identity.profile;
+  return out;
+}
+
+/** The core read, completed field by field by every registered reader. */
+function withReaders(
+  store: StoreLayout,
+  accountUuid: string,
+  core: CachedIdentity | undefined,
+): CachedIdentity | undefined {
+  if (readers.items.length === 0) return core;
+  const merged: AccountSighting = sightingOf(core);
+  for (const reader of readers.items) {
+    let extra: Partial<AccountSighting> | undefined;
+    try {
+      extra = reader(store, accountUuid);
+    } catch {
+      continue;
+    }
+    const found = sightingOf(extra);
+    merged.email ??= found.email;
+    merged.name ??= found.name;
+    merged.plan ??= found.plan;
+    merged.profile ??= found.profile;
+  }
+  const out = sightingOf(merged);
+  return hasAnything(out) ? out : undefined;
+}
+
+/**
+ * Everything known about an account: the fresh read, told to every observer
+ * when it found anything, then completed from the registered source that saw
+ * the account most recently.
+ *
+ * The fresh read of the app's cache is made only for the account signed in:
+ * the cache describes that session and no other, so asking it about the rest
+ * would either answer nothing or answer with the wrong profile. Readers are
+ * asked about every account, because what they read is theirs to scope.
+ */
+export function identityOf(
+  store: StoreLayout,
+  accountUuid: string,
+  ledger: Ledger,
+): ResolvedIdentity | undefined {
+  let signedIn: string | undefined;
+  try {
+    signedIn = readConfig(store).lastKnownAccountUuid;
+  } catch {
+    signedIn = undefined;
+  }
+  const core = signedIn === accountUuid ? coreIdentity(store, accountUuid) : undefined;
+  const fresh = withReaders(store, accountUuid, core);
+
+  if (hasAnything(fresh)) {
+    const sighting = sightingOf(fresh);
+    for (const observer of observers.items) {
+      try {
+        observer.onIdentitySeen(accountUuid, sighting, ledger);
+      } catch {
+        // An observer is told, not obeyed: its failure never changes the answer.
+      }
+    }
+  }
+
+  let known: KnownIdentity | undefined;
+  for (const source of sources.items) {
+    let found: KnownIdentity | undefined;
+    try {
+      found = source(accountUuid, ledger);
+    } catch {
+      continue;
+    }
+    if (!found || !hasAnything(found) || !Number.isFinite(found.seenAt)) continue;
+    if (!known || found.seenAt > known.seenAt) known = found;
+  }
+
+  return resolveIdentity(fresh, known);
+}
 
 /**
  * The human name behind an account UUID, read from the app's own cache.
@@ -72,17 +243,22 @@ export function resolveIdentity(
 ): ResolvedIdentity | undefined {
   if (!cached && !known) return undefined;
 
+  const fresh = sightingOf(cached);
+  const remembered = sightingOf(known);
   const merged: ResolvedIdentity = {
-    ...((cached?.email ?? known?.email) ? { email: cached?.email ?? known?.email } : {}),
-    ...((cached?.name ?? known?.name) ? { name: cached?.name ?? known?.name } : {}),
+    ...((fresh.email ?? remembered.email) ? { email: fresh.email ?? remembered.email } : {}),
+    ...((fresh.name ?? remembered.name) ? { name: fresh.name ?? remembered.name } : {}),
+    ...((fresh.plan ?? remembered.plan) ? { plan: fresh.plan ?? remembered.plan } : {}),
+    ...((fresh.profile ?? remembered.profile)
+      ? { profile: fresh.profile ?? remembered.profile }
+      : {}),
   };
-  if (!merged.email && !merged.name) return undefined;
+  if (!hasAnything(merged)) return undefined;
 
   // Only called remembered when the cache contributed nothing at all. A partial
   // read is still a fresh sighting of what it did find, and saying otherwise
   // would age the whole answer wrongly.
-  const fresh = Boolean(cached?.email || cached?.name);
-  if (!fresh && known) return { ...merged, remembered: true, seenAt: known.seenAt };
+  if (!hasAnything(fresh) && known) return { ...merged, remembered: true, seenAt: known.seenAt };
   return merged;
 }
 
@@ -132,7 +308,11 @@ export function readIdentityFromCache(
   accountUuid = readConfig(store).lastKnownAccountUuid,
 ): CachedIdentity | undefined {
   if (!accountUuid) return undefined;
+  return withReaders(store, accountUuid, coreIdentity(store, accountUuid));
+}
 
+/** What the app's own cache says, before any registered reader is asked. */
+function coreIdentity(store: StoreLayout, accountUuid: string): CachedIdentity | undefined {
   // The response cache first, because it holds the profile itself: an object
   // that names the account and carries its own email, so nothing is inferred
   // from proximity. The search below is the fallback, for a version that keeps

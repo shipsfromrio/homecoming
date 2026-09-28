@@ -3,7 +3,8 @@ import { listAccountDirs, listAgentAccountDirs } from '../domain/paths.js';
 import { project } from '../ledger/project.js';
 import type { Ledger } from '../ledger/log.js';
 import { readConfig } from './config.js';
-import { readIdentityFromCache, resolveIdentity, type ResolvedIdentity } from './identity.js';
+import { decorateAccount, type AccountDecoration } from '../cli/accountDecorators.js';
+import { identityOf, type ResolvedIdentity } from './identity.js';
 import { summarise } from './scanner.js';
 
 /**
@@ -33,6 +34,8 @@ export interface AccountOverview {
   remembered: boolean;
   /** When the identity was last confirmed, for anything remembered. */
   seenAt?: number;
+  /** What registered account decorators add to how this account is shown. */
+  decoration?: AccountDecoration;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -75,7 +78,7 @@ export function overviewAccounts(store: StoreLayout, ledger: Ledger): AccountOve
   }
 
   const rows = [...organizations.keys()].map((accountUuid) =>
-    overviewOf(store, accountUuid, {
+    overviewOf(store, ledger, accountUuid, {
       isCurrent: accountUuid === currentAccountUuid,
       organizationUuids: [...(organizations.get(accountUuid) ?? [])].sort(),
       counts: counts.get(accountUuid) ?? { sessions: 0, copies: 0 },
@@ -97,6 +100,7 @@ export function overviewAccounts(store: StoreLayout, ledger: Ledger): AccountOve
 
 function overviewOf(
   store: StoreLayout,
+  ledger: Ledger,
   accountUuid: string,
   context: {
     isCurrent: boolean;
@@ -106,13 +110,13 @@ function overviewOf(
     label: string | undefined;
   },
 ): AccountOverview {
-  // Read fresh only for the account signed in: the response cache describes that
-  // session and no other, so asking it about the rest would either answer
-  // nothing or — worse — answer with the current account's profile.
-  const cached = context.isCurrent ? readIdentityFromCache(store, accountUuid) : undefined;
-  const identity = resolveIdentity(cached, undefined);
+  // Read fresh only for the account signed in (`identityOf` decides that): the
+  // response cache describes that session and no other, so asking it about the
+  // rest would either answer nothing or — worse — answer with the current
+  // account's profile. Anything remembered comes from a registered source.
+  const identity = identityOf(store, accountUuid, ledger);
 
-  return {
+  const row: AccountOverview = {
     accountUuid,
     organizationUuids: context.organizationUuids,
     ...(context.label ? { label: context.label } : {}),
@@ -122,5 +126,8 @@ function overviewOf(
     agentOnly: context.agentOnly,
     ...(identity ? { identity } : {}),
     remembered: Boolean(identity?.remembered),
+    ...(identity?.seenAt !== undefined ? { seenAt: identity.seenAt } : {}),
   };
+  const decoration = decorateAccount(row, { store, ledger });
+  return decoration ? { ...row, decoration } : row;
 }
