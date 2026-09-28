@@ -20,16 +20,40 @@ export const DEFAULT_UPDATE_REPO = 'shipsfromrio/homecoming';
 
 const REPO_SHAPE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 
+/** A release tag: `v1.2.3`, `1.2.3`, `v1.2.3-rc.1`. Anything else is not spliced into a command. */
+const TAG_SHAPE = /^v?\d+(\.\d+)*(-[0-9A-Za-z.-]+)?$/;
+
 /**
- * Where a build that is not this repository's own gets its releases from: a
- * repository, and optionally a cache of its own, a way to ask for the latest
- * tag, and the command that installs one. At most one is registered; the core
- * registers none and checks this repository's releases.
+ * An install command a channel suggests, before it is printed for the user to
+ * run: one line of plain printable text, of a sane length, naming the tag it
+ * installs. Anything else is dropped for the core's command, the same way a
+ * `repo` that is not `owner/name` is.
+ */
+const MAX_INSTALL_COMMAND = 400;
+function plausibleInstallCommand(command: unknown, tag: string): command is string {
+  if (typeof command !== 'string') return false;
+  const trimmed = command.trim();
+  return (
+    trimmed !== '' &&
+    trimmed.length <= MAX_INSTALL_COMMAND &&
+    // Printable ASCII only: no newline to smuggle a second command onto the
+    // line, no escape sequence to repaint the terminal around it.
+    /^[ -~]+$/.test(trimmed) &&
+    trimmed.includes(tag)
+  );
+}
+
+/**
+ * Where releases are checked for: a repository, and optionally a cache of its
+ * own, a way to ask for the latest tag, and the command that installs one. At
+ * most one is registered; the core registers none and checks the repository
+ * `updateRepo` names.
  *
  * Every function here is called inside the check's "never throws" contract: a
- * `fetchLatest` that throws is an unknown answer, and an `installCommand` that
- * throws (or returns nothing) falls back to the core's command for the same
- * tag and repository.
+ * `fetchLatest` that throws, or answers with something that is not a release
+ * tag, is an unknown answer, and an `installCommand` that throws, returns
+ * nothing, or returns something other than one printable line naming the tag
+ * falls back to the core's command for the same tag and repository.
  */
 export interface UpdateChannel {
   /** `owner/name`, or a function of the environment returning one. */
@@ -59,8 +83,7 @@ export function registerUpdateChannel(next: UpdateChannel): () => void {
 
 /**
  * The `owner/name` whose releases are checked and installed from. A registered
- * channel names it first; otherwise a fork (or a private build) sets
- * `HOMECOMING_UPDATE_REPO`. A value that is not shaped like `owner/name`, from
+ * channel names it first; otherwise a fork sets `HOMECOMING_UPDATE_REPO`. A value that is not shaped like `owner/name`, from
  * either, is ignored rather than spliced into a URL, and so is a channel whose
  * `repo` function throws.
  */
@@ -187,7 +210,7 @@ export function installCommandFor(tag: string, repo: string = updateRepo()): str
   if (channel?.installCommand) {
     try {
       const command = channel.installCommand(tag, repo);
-      if (typeof command === 'string' && command.trim() !== '') return command;
+      if (plausibleInstallCommand(command, tag)) return command.trim();
     } catch {
       // Falls through to the core's command for the same tag and repository.
     }
@@ -239,7 +262,7 @@ export async function checkForUpdate(
     } catch {
       return undefined;
     }
-    if (typeof fetched !== 'string' || fetched === '') return undefined;
+    if (typeof fetched !== 'string' || !TAG_SHAPE.test(fetched)) return undefined;
     latest = fetched;
     writeCache(file, { latest, checkedAt: now, repo });
   }

@@ -13,9 +13,9 @@ import {
 } from '../src/update.js';
 
 /**
- * The update channel: where a build that is not this repository's own checks
- * for and installs releases. One at most; with none, the core's repository,
- * cache and command, exactly as before.
+ * The update channel: where releases are checked for and installed from. One
+ * at most; with none, the core's repository, cache and command, exactly as
+ * before.
  */
 
 const cleanups: (() => void)[] = [];
@@ -111,6 +111,31 @@ describe('update channel', () => {
 
     const status = await checkForUpdate({ current: '1.0.0', env: freshEnv() });
     expect(status?.command).toContain('someone/else/v2.0.0/install.ps1');
+  });
+
+  it.each([
+    ['two lines', 'install v2.0.0\nrm -rf ~'],
+    ['an escape sequence', '\u001b[2Kinstall v2.0.0'],
+    ['a command that does not name the tag', 'install latest'],
+    ['nothing but blanks', '   '],
+    ['a command far too long', `install v2.0.0 ${'x'.repeat(500)}`],
+    ['something not text', 42 as unknown as string],
+  ])('an install command with %s falls back to the core command', async (_what, command) => {
+    use({
+      repo: 'someone/else',
+      fetchLatest: async () => 'v2.0.0',
+      installCommand: () => command,
+    });
+
+    const status = await checkForUpdate({ current: '1.0.0', env: freshEnv() });
+    expect(status?.command).toBe(
+      'irm https://raw.githubusercontent.com/someone/else/v2.0.0/install.ps1 | iex',
+    );
+  });
+
+  it('a latest answer that is not a release tag is an unknown answer', async () => {
+    use({ repo: 'someone/else', fetchLatest: async () => 'v2.0.0/../../evil' });
+    await expect(checkForUpdate({ current: '1.0.0', env: freshEnv() })).resolves.toBeUndefined();
   });
 
   it('refuses a second channel, and accepts one again once the first is gone', () => {
