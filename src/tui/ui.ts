@@ -27,6 +27,10 @@ export interface DashboardAccount {
   isCurrent: boolean;
   /** Name (or email) from the app's cache or a namer — a fallback, not a label. */
   identityName?: string;
+  /** A short tag a plugin's account decorator put after the name. */
+  marker?: string;
+  /** Short facts a plugin's account decorator shows beside the counts. */
+  meta?: readonly string[];
   sessions: number;
   copies: number;
 }

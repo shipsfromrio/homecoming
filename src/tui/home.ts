@@ -77,8 +77,11 @@ export function renderHome(
     // The cursor takes the gutter; the current-account bar yields to it for
     // the moment — the ● marker keeps saying which account is signed in.
     const caret = selected ? accent('▸') : account.isCurrent ? accent('▌') : ' ';
-    const left = `${caret} ${marker} ${name}`;
+    const tag = account.marker ? ` ${accent(account.marker)}` : '';
+    const left = `${caret} ${marker} ${name}${tag}`;
+    const facts = account.meta?.length ? dim(`${account.meta.join(' · ')} · `) : '';
     const right =
+      facts +
       counted(account.sessions, sessionDigits, 'session', 'sessions') +
       dim(' · ') +
       counted(account.copies, copyDigits, 'copy', 'copies') +
