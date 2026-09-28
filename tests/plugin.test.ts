@@ -9,7 +9,6 @@ import { projectSlot } from '../src/ledger/extensions.js';
 import { Ledger } from '../src/ledger/log.js';
 import { findStopped } from '../src/engine/revive.js';
 import { configDirCandidates } from '../src/store/configDirs.js';
-import { refuseGuarded } from '../src/store/appPrefs.js';
 import { labelsOf } from '../src/cli/names.js';
 import { menuCommands } from '../src/tui/slash.js';
 import type { DiscoveredSession } from '../src/domain/types.js';
@@ -28,7 +27,11 @@ import {
   runSweepPhases,
 } from '../src/extensions.js';
 import { runImportUndo } from '../src/ops/importUndo.js';
-import { appPrefWriteNotices } from '../src/store/appPrefs.js';
+import {
+  appPrefWriteNotices,
+  planAccountPrefsCarry,
+  refuseGuarded,
+} from '../src/store/appPrefs.js';
 import type { AccountOverview } from '../src/store/accounts.js';
 import { identityOf } from '../src/store/identity.js';
 import { localStorageDir } from '../src/store/localStorage.js';
@@ -471,6 +474,12 @@ describe('the extension points a plugin can fill beyond commands and state', () 
       }),
       'utf8',
     );
+    const carried = makeStore();
+    writeFileSync(
+      carried.desktopConfigFile,
+      JSON.stringify({ preferences: { wideCarriedPref: { [OLD_ACCOUNT.accountUuid]: 'kept' } } }),
+      'utf8',
+    );
     const printed = await greet();
     planLayout({ store: layoutStore, target: NEW_ACCOUNT });
     let storeArg: string | undefined;
@@ -496,6 +505,7 @@ describe('the extension points a plugin can fill beyond commands and state', () 
         { store, guarded: false },
       ),
       layoutAsked: asked.includes('layout'),
+      carried: planAccountPrefsCarry(carried, NEW_ACCOUNT, OLD_ACCOUNT).changes,
       updateRepo: updateRepo({}),
       themeSlot: themeColor(FOSTER_NIGHT, 'wide'),
       agentTools: listAgentTools().map((tool) => tool.name),
@@ -519,6 +529,7 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     expect(got.imports).toEqual(['undid one']);
     expect(got.notices).toEqual(['wrote menuBarEnabled']);
     expect(got.layoutAsked).toBe(true);
+    expect(got.carried).toEqual({ wideCarriedPref: 'kept' });
     expect(got.updateRepo).toBe('example-owner/example-repo');
     expect(got.themeSlot).toBe('#112233');
     expect(got.agentTools).toEqual(['wide']);
@@ -541,6 +552,7 @@ describe('the extension points a plugin can fill beyond commands and state', () 
     expect(got.imports).toEqual([]);
     expect(got.notices).toEqual([]);
     expect(got.layoutAsked).toBe(false);
+    expect(got.carried).toEqual({});
     expect(got.updateRepo).not.toBe('example-owner/example-repo');
     expect(got.themeSlot).toBeUndefined();
     expect(got.agentTools).toEqual([]);

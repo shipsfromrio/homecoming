@@ -6009,9 +6009,6 @@ export async function runCli(
     for (const step of undo.reverse()) step();
     undo.length = 0;
   };
-  // Runs last on unregister, once every plugin's dimensions are gone, so
-  // `stats --by` goes back to accepting only what is still registered.
-  undo.push(refreshStatsDimensions);
   // A plugin that fails to register is an error like any other: printed, exit
   // code 1, nothing thrown, and nothing half-registered left behind. The
   // command line is not run with a plugin missing.

@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +67,10 @@ afterEach(() => {
  * `runCli` reports like any other error.
  */
 async function run(plugins: HomecomingPlugin[], argv: string[]): Promise<Run> {
+  // The previous run's plugins go first: registered twice, a plugin would be
+  // refused (a taken dimension name) or consulted twice (a provider).
+  dispose?.();
+  dispose = undefined;
   const out: string[] = [];
   const err: string[] = [];
   vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
@@ -296,6 +300,36 @@ describe('stats --by and a stats dimension', () => {
     expect(after.exitCode).toBe(1);
   });
 
+  it("groups the printed report by the plugin's key and prints its counter", async () => {
+    const { global } = signedIn();
+    const configDir = mkdtempSync(path.join(tmpdir(), 'homecoming-plugin-cli-config-'));
+    const project = path.join(configDir, 'projects', 'example-project');
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      path.join(project, '00000000-0000-4000-8000-0000000000d1.jsonl'),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: new Date().toISOString(),
+        message: { model: 'claude-sonnet-5', usage: { input_tokens: 5, output_tokens: 7 } },
+      }),
+      'utf8',
+    );
+    const transcripts = definePlugin({
+      name: 'transcripts',
+      configDirProviders: [() => [configDir]],
+    });
+
+    const plain = (await run([transcripts], [...global, 'stats'])).out.join('\n');
+    expect(plain).toContain('claude-sonnet-5');
+    expect(plain).not.toContain('examples');
+
+    const result = await run([transcripts, grouping], [...global, 'stats', '--by', 'example']);
+    const printed = result.out.join('\n');
+    expect(printed).toMatch(/by example:/);
+    expect(printed).toMatch(/everything .*· examples 1/);
+    expect(printed).toMatch(/Total: 1 session\(s\).*· examples 1/);
+  });
+
   it('still accepts the core dimensions with a plugin registered', async () => {
     const { global } = signedIn();
     for (const by of ['model', 'week']) {
@@ -303,6 +337,25 @@ describe('stats --by and a stats dimension', () => {
       expect(result.exitCode).toBeUndefined();
       expect(lastJson<{ by: string }>(result).by).toBe(by);
     }
+  });
+});
+
+describe('a config dir provider and the ledger of the command', () => {
+  it('is handed the ledger `--ledger` named, the one the command acts on', async () => {
+    const { global, ledger } = signedIn();
+    const handed: (string | undefined)[] = [];
+    const listening = definePlugin({
+      name: 'listening',
+      configDirProviders: [
+        (_env, _home, context) => {
+          handed.push(context?.ledger?.path);
+          return [];
+        },
+      ],
+    });
+    await run([listening], [...global, 'stats', '--json']);
+    expect(handed.length).toBeGreaterThan(0);
+    expect(handed.every((ledgerPath) => ledgerPath === ledger)).toBe(true);
   });
 });
 
